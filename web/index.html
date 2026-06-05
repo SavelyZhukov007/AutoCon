@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoCon</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+
+<body>
+  <div class="app">
+    <nav class="rail">
+      <span class="logo" id="logo"></span>
+      <button class="rail-btn active" data-view="video" title="Видео"><span data-icon="video"></span></button>
+      <button class="rail-btn" data-view="camera" title="Камера"><span data-icon="camera"></span></button>
+      <button class="rail-btn" data-view="events" title="События"><span data-icon="sign"></span></button>
+      <span class="grow"></span>
+      <button class="rail-btn" id="btnSettings" title="Настройки"><span data-icon="settings"></span></button>
+    </nav>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="brand"><b>AutoCon</b><span>YOLO11 road assistant</span></div>
+        <button class="btn primary" id="btnOpen"><span data-icon="open"></span>Открыть видео</button>
+        <button class="btn" id="btnAnalyze" disabled><span data-icon="scan"></span>Анализ</button>
+        <button class="btn" id="btnCamera"><span data-icon="camera"></span>Камера</button>
+        <button class="btn ghost" id="btnExport" disabled><span data-icon="export"></span>Отчёт</button>
+        <span class="grow"></span>
+        <div class="env">
+          <span id="envDevice"><i></i><span data-icon="chip"></span><b>device</b></span>
+          <span id="envRuntime"><i></i>runtime</span>
+          <span id="envModels"><i></i>models</span>
+          <span id="envOllama"><i></i>ollama</span>
+        </div>
+      </header>
+
+      <section class="main-grid">
+        <section class="stage-col">
+          <div id="viewVideo" class="view">
+            <div class="stage" id="videoStage">
+              <div class="empty" id="emptyVideo"><span data-icon="video"></span>
+                <p>Загрузите видео или включите камеру</p>
+              </div>
+              <video id="video" playsinline></video>
+              <canvas id="videoOverlay"></canvas>
+              <div class="process hidden" id="processBox">
+                <div class="rings"><span></span><span></span><b id="processPct">0%</b></div>
+                <p id="processText">Подготовка анализа</p>
+                <div class="bar"><i id="processFill"></i></div>
+              </div>
+            </div>
+            <div class="transport">
+              <button class="iconbtn" id="btnPlay"><span data-icon="play"></span></button>
+              <span class="tc" id="tcCur">00:00:00</span>
+              <input type="range" id="seek" min="0" max="1000" value="0" />
+              <span class="tc" id="tcDur">00:00:00</span>
+            </div>
+          </div>
+
+          <div id="viewCamera" class="view hidden">
+            <div class="stage camera-stage">
+              <div class="empty" id="emptyCamera"><span data-icon="camera"></span>
+                <p>Выберите камеру и нажмите старт</p>
+              </div>
+              <img id="cameraFrame" alt="" />
+              <canvas id="cameraOverlay"></canvas>
+            </div>
+            <div class="transport">
+              <select id="cameraList"></select>
+              <button class="btn primary" id="btnStartCamera"><span data-icon="play"></span>Старт</button>
+              <button class="btn" id="btnStopCamera"><span data-icon="close"></span>Стоп</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="side">
+          <div class="tabs">
+            <button class="tab active" data-pane="commentary"><span data-icon="bot"></span>Комментарий</button>
+            <button class="tab" data-pane="signs"><span data-icon="sign"></span>Знаки</button>
+            <button class="tab" data-pane="vehicles"><span data-icon="car"></span>Авто/номера</button>
+            <button class="tab" data-pane="events"><span data-icon="scan"></span>События</button>
+          </div>
+          <div class="pane active" id="paneCommentary">
+            <div class="live-comment" id="liveComment">AutoCon готовит анализ сцены.</div>
+            <div class="list" id="commentsList"></div>
+          </div>
+          <div class="pane" id="paneSigns">
+            <div class="list" id="signList"></div>
+          </div>
+          <div class="pane" id="paneVehicles">
+            <div class="list" id="vehicleList"></div>
+          </div>
+          <div class="pane" id="paneEvents">
+            <div class="list" id="eventList"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <div class="overlay" id="installOverlay">
+    <div class="modal">
+      <div class="mh">Первый запуск AutoCon <button class="iconbtn" id="installClose"><span
+            data-icon="close"></span></button></div>
+      <div class="mb">
+        <p class="muted">Выберите компоненты. Всё ставится скрыто через uv в пользовательский runtime, без всплывающих
+          терминалов.</p>
+        <div id="installList" class="check-list"></div>
+        <h4>Модели</h4>
+        <div id="modelList" class="check-list"></div>
+        <div class="bar big hidden" id="installProgress"><i id="installFill"></i></div>
+        <pre id="installLog" class="log hidden"></pre>
+      </div>
+      <div class="mf">
+        <button class="btn ghost" id="installSkip">Пропустить</button>
+        <button class="btn primary" id="installRun"><span data-icon="download"></span>Установить выбранное</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="settingsOverlay">
+    <div class="modal settings">
+      <div class="mh">Настройки <button class="iconbtn" id="settingsClose"><span data-icon="close"></span></button>
+      </div>
+      <div class="mb" id="settingsForm"></div>
+      <div class="mf"><button class="btn primary" id="settingsSave"><span data-icon="check"></span>Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+
+</html>

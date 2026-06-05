@@ -1,0 +1,6 @@
+# Lightweight desktop shell dependencies.
+# Heavy ML packages are installed on first run into %APPDATA%\AutoCon\runtime.
+pywebview>=5.0
+requests>=2.31
+qrcode[pil]>=8.0
+pyinstaller>=6.3
