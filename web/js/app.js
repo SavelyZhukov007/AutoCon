@@ -12,6 +12,8 @@ const state = {
   plates: [],
   comments: [],
   cameraRunning: false,
+  chatAnswerEl: null,
+  chatAnswerBuf: "",
 };
 
 ready().then(async (api) => {
@@ -36,6 +38,14 @@ function bind() {
   $("#video").addEventListener("loadedmetadata", () => $("#tcDur").textContent = fmt($("#video").duration));
   $("#btnStartCamera").addEventListener("click", startCamera);
   $("#btnStopCamera").addEventListener("click", stopCamera);
+  $("#chatRefresh").addEventListener("click", refreshChatProjects);
+  $("#chatSend").addEventListener("click", sendChat);
+  $("#chatQuestion").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendChat();
+    }
+  });
   $("#btnSettings").addEventListener("click", openSettings);
   $("#settingsClose").addEventListener("click", () => $("#settingsOverlay").classList.remove("open"));
   $("#settingsSave").addEventListener("click", saveSettings);
@@ -121,6 +131,21 @@ function bindBus() {
   Bus.on("camera:error", (d) => {
     $("#liveComment").textContent = d.message || "Ошибка камеры";
   });
+  Bus.on("chat:start", (d) => {
+    addChatMessage("user", d.question || "");
+    state.chatAnswerBuf = "";
+    state.chatAnswerEl = addChatMessage("ai", "", "AutoCon / Ollama");
+  });
+  Bus.on("chat:token", (d) => {
+    state.chatAnswerBuf += d.token || "";
+    if (state.chatAnswerEl) state.chatAnswerEl.querySelector(".txt").textContent = state.chatAnswerBuf;
+  });
+  Bus.on("chat:done", (d) => {
+    if (state.chatAnswerEl) state.chatAnswerEl.querySelector(".txt").textContent = d.answer || state.chatAnswerBuf;
+  });
+  Bus.on("chat:error", (d) => {
+    addChatMessage("ai", d.message || "Ошибка чата", "Ошибка");
+  });
   Bus.on("error", (d) => {
     $("#processBox").classList.add("hidden");
     $("#liveComment").textContent = d.message || "Ошибка";
@@ -194,6 +219,7 @@ function loadProject(p) {
   $("#btnExport").disabled = !state.signSeq.length && !state.vehicles.length && !state.plates.length;
   showView("video");
   renderAll();
+  refreshChatProjects();
 }
 
 async function analyze() {
@@ -312,7 +338,9 @@ function showView(name) {
   $$(".rail-btn[data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   $("#viewVideo").classList.toggle("hidden", name !== "video" && name !== "events");
   $("#viewCamera").classList.toggle("hidden", name !== "camera");
+  $("#viewChat").classList.toggle("hidden", name !== "chat");
   if (name === "events") showPane("events");
+  if (name === "chat") refreshChatProjects();
 }
 
 function showPane(name) {
@@ -355,4 +383,40 @@ async function saveSettings() {
   state.settings = await API.update_settings(patch);
   $("#settingsOverlay").classList.remove("open");
   await refreshEnv();
+}
+
+async function refreshChatProjects() {
+  if (!API || !API.list_chat_projects) return;
+  const list = await API.list_chat_projects();
+  const select = $("#chatProject");
+  select.innerHTML = list.length
+    ? list.map((p) => `<option value="${esc(p.id)}">${esc(p.title)} · ${fmt(p.duration || 0)}</option>`).join("")
+    : `<option value="">Нет обработанных видео</option>`;
+  if (!list.length && !$("#chatBody .msg")) {
+    $("#chatBody").innerHTML = `<div class="chat-empty">Сначала обработайте видео, потом его можно будет обсуждать с моделью.</div>`;
+  }
+}
+
+function addChatMessage(kind, text, meta = "") {
+  const body = $("#chatBody");
+  const empty = body.querySelector(".chat-empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = `msg ${kind}`;
+  div.innerHTML = `${meta ? `<div class="meta">${esc(meta)}</div>` : ""}<div class="txt"></div>`;
+  div.querySelector(".txt").textContent = text || "";
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+  return div;
+}
+
+async function sendChat() {
+  const projectId = $("#chatProject").value;
+  const question = $("#chatQuestion").value.trim();
+  if (!question) return;
+  $("#chatQuestion").value = "";
+  const res = await API.chat_about_project(projectId, question);
+  if (res && res.ok === false) {
+    addChatMessage("ai", res.error || "Не удалось отправить вопрос", "Ошибка");
+  }
 }

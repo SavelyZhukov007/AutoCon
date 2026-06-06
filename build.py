@@ -129,6 +129,18 @@ def cmd_build(args) -> Path:
         "--add-data", f"{BUILD_INFO}{sep}.",
         "--hidden-import", "qrcode.image.svg",
     ]
+    for hidden in (
+        # Runtime ML packages are installed outside the exe, but when they are
+        # imported by the frozen app they still need these stdlib modules in
+        # PyInstaller's embedded Python archive.
+        "colorsys",
+        "pickletools",
+        "lzma",
+        "bz2",
+        "sqlite3",
+        "xml.etree.ElementTree",
+    ):
+        cmd += ["--hidden-import", hidden]
     if not args.onedir:
         cmd.append("--onefile")
     if icon.exists():

@@ -15,6 +15,7 @@
       <button class="rail-btn active" data-view="video" title="Видео"><span data-icon="video"></span></button>
       <button class="rail-btn" data-view="camera" title="Камера"><span data-icon="camera"></span></button>
       <button class="rail-btn" data-view="events" title="События"><span data-icon="sign"></span></button>
+      <button class="rail-btn" data-view="chat" title="Чат по видео"><span data-icon="chat"></span></button>
       <span class="grow"></span>
       <button class="rail-btn" id="btnSettings" title="Настройки"><span data-icon="settings"></span></button>
     </nav>
@@ -95,6 +96,24 @@
             <div class="list" id="eventList"></div>
           </div>
         </aside>
+      </section>
+
+      <section id="viewChat" class="chat-view hidden">
+        <div class="chat-head">
+          <div>
+            <h2><span data-icon="chat"></span> Чат по обработанным видео</h2>
+            <p>Выберите проект и спросите Ollama, что было распознано, что выглядит неверно и что стоит перепроверить.</p>
+          </div>
+          <select id="chatProject"></select>
+          <button class="btn" id="chatRefresh"><span data-icon="scan"></span>Обновить</button>
+        </div>
+        <div class="chat-body" id="chatBody">
+          <div class="chat-empty">Обработанные видео появятся здесь после анализа.</div>
+        </div>
+        <div class="chat-input">
+          <textarea id="chatQuestion" rows="1" placeholder="Например: какие знаки модель могла перепутать и почему?"></textarea>
+          <button class="btn primary" id="chatSend"><span data-icon="chat"></span>Спросить</button>
+        </div>
       </section>
     </main>
   </div>

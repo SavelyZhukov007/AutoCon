@@ -1,5 +1,6 @@
 import os
 import unittest
+from argparse import Namespace
 
 from app import config
 from app.core import device, llm, model_registry, runtime
@@ -18,6 +19,12 @@ class RuntimeRegistryTests(unittest.TestCase):
         self.assertEqual(pkgs.count("ultralytics>=8.3"), 1)
         self.assertEqual(pkgs[-1], "lap>=0.5.12")
 
+    def test_cuda_warning_does_not_fail_if_torch_imports(self):
+        health = runtime.health_check(["gpu"])
+        torch_failed = any(item.get("module") == "torch" for item in health["failed"])
+        if not torch_failed:
+            self.assertTrue(health["ok"])
+
 
 class HiddenProcessTests(unittest.TestCase):
     def test_windows_startup_kwargs_hide_window(self):
@@ -27,6 +34,31 @@ class HiddenProcessTests(unittest.TestCase):
             self.assertIn("startupinfo", kwargs)
         else:
             self.assertEqual(kwargs, {})
+
+    def test_build_includes_runtime_stdlib_hidden_imports(self):
+        import build
+
+        commands = []
+
+        def fake_run(cmd, check=True, hidden=False):
+            commands.append([str(x) for x in cmd])
+            return 0
+
+        old_run = build.run
+        old_clean = build.clean_artifacts
+        old_write = build.write_build_info
+        try:
+            build.run = fake_run
+            build.clean_artifacts = lambda: None
+            build.write_build_info = lambda: "test"
+            build.cmd_build(Namespace(onedir=False))
+        finally:
+            build.run = old_run
+            build.clean_artifacts = old_clean
+            build.write_build_info = old_write
+        joined = " ".join(commands[-1])
+        self.assertIn("pickletools", joined)
+        self.assertIn("colorsys", joined)
 
 
 class DevicePolicyTests(unittest.TestCase):
@@ -128,6 +160,11 @@ class PromptTests(unittest.TestCase):
         prompt = llm.prompt_scene_commentary({"signs": [{"label": "stop"}]})
         self.assertIn("JSON", prompt)
         self.assertIn("stop", prompt)
+
+    def test_video_chat_prompt_contains_question_and_context(self):
+        prompt = llm.prompt_video_chat("что распознано неверно?", {"title": "road", "plates": [{"text": "A123BC77"}]})
+        self.assertIn("что распознано неверно?", prompt)
+        self.assertIn("A123BC77", prompt)
 
 
 if __name__ == "__main__":

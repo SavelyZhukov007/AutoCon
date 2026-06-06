@@ -214,6 +214,24 @@ class Api:
     def list_projects(self) -> list[dict]:
         return project.list_projects()
 
+    def list_chat_projects(self) -> list[dict]:
+        items = []
+        for item in project.list_projects():
+            try:
+                data = project.load(item["id"])
+            except Exception:
+                continue
+            has_context = bool(
+                data.get("summary")
+                or data.get("sign_sequences")
+                or data.get("vehicles")
+                or data.get("plates")
+                or data.get("comments")
+            )
+            if has_context:
+                items.append({**item, "has_context": True})
+        return items
+
     def pick_video(self) -> dict | None:
         window = self._window()
         if not window:
@@ -332,6 +350,31 @@ class Api:
                 pass
 
         self._bg(run)
+
+    def chat_about_project(self, project_id: str, question: str) -> dict:
+        if not project_id:
+            return {"ok": False, "error": "Выберите обработанное видео"}
+        if not (question or "").strip():
+            return {"ok": False, "error": "Введите вопрос"}
+        self._emit("chat:start", {"project_id": project_id, "question": question})
+        self._bg(self._chat_about_project_bg, project_id, question.strip())
+        return {"ok": True}
+
+    def _chat_about_project_bg(self, project_id: str, question: str) -> None:
+        try:
+            data = project.load(project_id)
+            cli = self._get_llm()
+            if not cli.available():
+                self._emit("chat:error", {"message": "Ollama не запущена или недоступна"})
+                return
+            answer = cli.generate(
+                llm.prompt_video_chat(question, data),
+                system=llm.SYS_AUTOCON,
+                on_token=lambda token: self._emit("chat:token", {"token": token}),
+            )
+            self._emit("chat:done", {"answer": answer, "project_id": project_id})
+        except Exception as exc:
+            self._emit("chat:error", {"message": str(exc)})
 
     def list_camera_devices(self) -> list[dict]:
         return media.list_cameras()

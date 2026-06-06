@@ -357,6 +357,7 @@ def module_available(name: str) -> bool:
 
 def health_check(keys: Optional[Iterable[str]] = None) -> dict:
     config.bootstrap_runtime_packages()
+    key_set = set(keys or [])
     modules: list[str] = []
     if keys:
         for key in keys:
@@ -370,15 +371,17 @@ def health_check(keys: Optional[Iterable[str]] = None) -> dict:
         except Exception as exc:
             failed.append({"module": module, "error": str(exc)})
     cuda = False
+    warnings = []
     try:
         import torch
 
         cuda = bool(torch.cuda.is_available())
-    except Exception:
-        pass
-    if keys and "gpu" in set(keys) and not cuda:
-        failed.append({"module": "torch", "error": "CUDA is unavailable"})
-    return {"ok": not failed, "failed": failed, "cuda": cuda}
+    except Exception as exc:
+        if "gpu" in key_set and not any(item.get("module") == "torch" for item in failed):
+            failed.append({"module": "torch", "error": str(exc)})
+    if "gpu" in key_set and not cuda and not any(item.get("module") == "torch" for item in failed):
+        warnings.append({"module": "torch", "warning": "CUDA is unavailable; AutoCon will use CPU until CUDA-ready torch is installed."})
+    return {"ok": not failed, "failed": failed, "warnings": warnings, "cuda": cuda}
 
 
 def check_features() -> list[dict]:
@@ -390,7 +393,7 @@ def check_features() -> list[dict]:
     for key, meta in FEATURES.items():
         installed = all(module_available(module) for module in meta["modules"])
         if key == "gpu":
-            installed = health_check(["gpu"])["ok"]
+            installed = module_available("torch") and module_available("onnxruntime")
         out.append(
             {
                 "key": key,

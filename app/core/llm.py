@@ -136,3 +136,23 @@ def prompt_report_summary(project: dict) -> str:
         "заметные транспортные объекты, номера и важные моменты. До 8 пунктов.\n\n"
         f"Данные JSON:\n{json.dumps(brief, ensure_ascii=False, indent=2)}"
     )
+
+
+def prompt_video_chat(question: str, project: dict) -> str:
+    context = {
+        "title": project.get("title"),
+        "duration": project.get("duration"),
+        "summary": project.get("summary", ""),
+        "sign_sequences": project.get("sign_sequences", [])[:120],
+        "vehicles": project.get("vehicles", [])[:120],
+        "plates": project.get("plates", [])[:80],
+        "comments": project.get("comments", [])[:80],
+    }
+    return (
+        "Ответь на вопрос пользователя по уже обработанному видео AutoCon. "
+        "Опирайся только на JSON-контекст: знаки, последовательности, транспорт, номера, комментарии и сводку. "
+        "Если данных недостаточно или модель могла ошибиться, прямо скажи, что нужно перепроверить кадры/веса/пороги. "
+        "Отвечай по-русски, кратко, но полезно.\n\n"
+        f"Вопрос: {question}\n\n"
+        f"Контекст JSON:\n{json.dumps(context, ensure_ascii=False, indent=2)}"
+    )

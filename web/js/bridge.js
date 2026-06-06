@@ -62,5 +62,7 @@ function mockApi() {
     async finish_first_run() { return true; },
     async install_packages() { return { ok: true }; },
     async install_model_pack() { return { ok: true }; },
+    async list_chat_projects() { return []; },
+    async chat_about_project() { return { ok: false, error: "preview" }; },
   };
 }
