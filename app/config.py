@@ -170,6 +170,7 @@ DEFAULTS = {
     "ollama_host": "http://127.0.0.1:11434",
     "ollama_model": "",
     "default_model": "qwen2.5:3b",
+    "vision_model": "qwen2.5vl:3b",
 }
 
 

@@ -1,11 +1,19 @@
 import os
+import subprocess
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
 
 from app import config
 from app.core import device, llm, model_registry, runtime
 from app.core.hidden import startup_kwargs
-from app.core.vision import EventAggregator, position_for_bbox, FrameShape
+from app.core.vision import (
+    EventAggregator,
+    FrameShape,
+    SignSetInterpreter,
+    position_for_bbox,
+)
 
 
 class RuntimeRegistryTests(unittest.TestCase):
@@ -77,6 +85,47 @@ class ModelRegistryTests(unittest.TestCase):
         for pack in packs:
             self.assertTrue(pack["title"])
             self.assertTrue(pack["target"])
+
+    def test_traffic_sign_pack_prefers_existing_hub_files(self):
+        meta = model_registry.PACKS["traffic_signs_100"]
+        repos = model_registry.candidate_repos(meta)
+        self.assertEqual(repos[0]["repo"], "RZhukotynskyi/sign-detection-yolov8s")
+        self.assertIn("sdv4.pt", repos[0]["filenames"])
+        self.assertNotIn("sign-detection-yolov8s.pt", repos[0]["filenames"])
+
+    def test_install_pack_downloads_picked_hub_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "traffic.pt"
+            old_model_path = model_registry.model_path
+            old_pick = model_registry.pick_existing_hf_file
+            old_run = model_registry.run_hidden
+            commands = []
+
+            def fake_model_path(_name):
+                return target
+
+            def fake_pick(_python, repo, filenames):
+                self.assertIn("sdv4.pt", filenames)
+                return {"ok": True, "filename": "sdv4.pt"} if "RZhukotynskyi" in repo else {"ok": False}
+
+            def fake_run(cmd, timeout=None):
+                commands.append(" ".join(str(x) for x in cmd))
+                target.write_text("weights", encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 0, "")
+
+            try:
+                model_registry.model_path = fake_model_path
+                model_registry.pick_existing_hf_file = fake_pick
+                model_registry.run_hidden = fake_run
+                res = model_registry.install_pack("traffic_signs_100", Path("python.exe"))
+            finally:
+                model_registry.model_path = old_model_path
+                model_registry.pick_existing_hf_file = old_pick
+                model_registry.run_hidden = old_run
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["filename"], "sdv4.pt")
+        self.assertIn("sdv4.pt", commands[-1])
 
 
 class EventAggregatorTests(unittest.TestCase):
@@ -154,6 +203,35 @@ class EventAggregatorTests(unittest.TestCase):
             position_for_bbox([900, 10, 1000, 100], FrameShape(1000, 500)), "top-right"
         )
 
+    def test_contexts_are_saved_in_result(self):
+        agg = EventAggregator()
+        agg.add_context({"time": 1, "explanation": "ok"})
+        self.assertEqual(agg.result()["contexts"][0]["explanation"], "ok")
+
+
+class RoadContextTests(unittest.TestCase):
+    def test_sign_set_interpreter_marks_clear_lane_applicability(self):
+        interp = SignSetInterpreter()
+        ctx = interp.interpret(
+            3.0,
+            [
+                {
+                    "kind": "sign",
+                    "label": "speed limit 60",
+                    "confidence": 0.9,
+                    "bbox": [760, 80, 860, 180],
+                    "position": "top-right",
+                }
+            ],
+            {
+                "lane": "center",
+                "confidence": 0.6,
+                "shape": {"width": 1000, "height": 600},
+            },
+        )
+        self.assertEqual(ctx["applies_to_ego_lane"], "yes")
+        self.assertIn("speed limit 60", ctx["explanation"])
+
 
 class PromptTests(unittest.TestCase):
     def test_scene_prompt_contains_structured_data(self):
@@ -165,6 +243,38 @@ class PromptTests(unittest.TestCase):
         prompt = llm.prompt_video_chat("что распознано неверно?", {"title": "road", "plates": [{"text": "A123BC77"}]})
         self.assertIn("что распознано неверно?", prompt)
         self.assertIn("A123BC77", prompt)
+
+    def test_exam_photo_prompt_contains_question_findings_and_pdd(self):
+        prompt = llm.prompt_exam_photo(
+            "можно ли повернуть?",
+            {"detections": [{"label": "no left turn"}]},
+        )
+        self.assertIn("можно ли повернуть?", prompt)
+        self.assertIn("no left turn", prompt)
+        self.assertIn("ПДД РФ", prompt)
+
+    def test_ollama_generate_sends_images_for_vision_model(self):
+        seen = {}
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"response": "ok"}
+
+        old_post = llm.requests.post
+        try:
+            llm.requests.post = lambda _url, json, timeout: seen.update(json) or Response()
+            cli = llm.OllamaClient("http://127.0.0.1:11434", model="qwen2.5:3b")
+            self.assertEqual(
+                cli.generate("prompt", model="qwen2.5vl:3b", images=["abc"]),
+                "ok",
+            )
+        finally:
+            llm.requests.post = old_post
+        self.assertEqual(seen["model"], "qwen2.5vl:3b")
+        self.assertEqual(seen["images"], ["abc"])
 
 
 if __name__ == "__main__":

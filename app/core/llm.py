@@ -75,14 +75,18 @@ class OllamaClient:
         system: str = "",
         on_token: Optional[Callable[[str], None]] = None,
         temperature: float = 0.25,
+        model: str | None = None,
+        images: Optional[list[str]] = None,
     ) -> str:
         payload = {
-            "model": self.resolve_model(),
+            "model": model or self.resolve_model(),
             "prompt": prompt,
             "system": system,
             "stream": bool(on_token),
             "options": {"temperature": temperature, "num_ctx": 8192},
         }
+        if images:
+            payload["images"] = images
         if not on_token:
             response = requests.post(
                 self.host + "/api/generate", json=payload, timeout=120
@@ -155,4 +159,41 @@ def prompt_video_chat(question: str, project: dict) -> str:
         "Отвечай по-русски, кратко, но полезно.\n\n"
         f"Вопрос: {question}\n\n"
         f"Контекст JSON:\n{json.dumps(context, ensure_ascii=False, indent=2)}"
+    )
+
+
+PDD_RU_CONTEXT = {
+    "version": "ПДД РФ, Постановление Правительства РФ N 1090, локальная краткая база",
+    "principles": [
+        "Водитель обязан соблюдать требования дорожных знаков, разметки и сигналов.",
+        "Запрещающие и предписывающие знаки применяются к направлению или полосе, где они установлены, если таблички или разметка не уточняют иное.",
+        "Знаки приоритета, светофоры, временные знаки и регулировщик имеют приоритет над обычной разметкой в типичных конфликтных ситуациях.",
+        "При сомнении нельзя делать категоричный вывод: нужно указать, какие элементы кадра следует проверить.",
+    ],
+    "common_signs": {
+        "stop": "движение без остановки запрещено",
+        "give way": "уступить дорогу",
+        "speed limit": "ограничение максимальной скорости",
+        "no entry": "въезд запрещён",
+        "no stopping": "остановка запрещена",
+        "no parking": "стоянка запрещена",
+        "pedestrian crossing": "пешеходный переход",
+        "traffic light": "регулируемый участок",
+        "lane direction": "направления движения по полосам",
+    },
+}
+
+
+def prompt_exam_photo(question: str, findings: dict) -> str:
+    context = {
+        "question": question,
+        "visual_findings": findings,
+        "pdd_context": PDD_RU_CONTEXT,
+    }
+    return (
+        "Проанализируй экзаменационную дорожную ситуацию по изображению и вопросу. "
+        "Используй видимые объекты, знаки, разметку, светофоры и краткую локальную базу ПДД РФ. "
+        "Если данных недостаточно, прямо укажи неопределённость. Не выдумывай элементы, которых нет в данных. "
+        "Формат ответа: 1) короткий ответ; 2) почему; 3) какие знаки/разметка/правила повлияли; 4) уверенность.\n\n"
+        f"Данные JSON:\n{json.dumps(context, ensure_ascii=False, indent=2)}"
     )

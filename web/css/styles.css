@@ -326,6 +326,13 @@ select {
   text-align: center
 }
 
+.rt-status {
+  color: var(--muted);
+  font: 11px var(--mono);
+  min-width: 190px;
+  text-align: right
+}
+
 #seek {
   flex: 1;
   accent-color: var(--accent)
@@ -348,6 +355,57 @@ input[type=number] {
   display: flex;
   flex-direction: column;
   background: var(--bg)
+}
+
+.current-context {
+  border-bottom: 1px solid var(--soft);
+  padding: 14px 16px;
+  background: linear-gradient(180deg, var(--panel), var(--bg-2))
+}
+
+.context-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px
+}
+
+.context-head span {
+  color: var(--warn);
+  font: 12px var(--mono)
+}
+
+.current-context p {
+  color: var(--ink);
+  margin-bottom: 10px
+}
+
+.context-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px
+}
+
+.context-grid b {
+  color: var(--accent);
+  font: 12px var(--mono)
+}
+
+.context-signs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px
+}
+
+.context-signs span {
+  border: 1px solid rgba(240, 180, 65, .35);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 3px 7px;
+  font-size: 11px
 }
 
 .tabs {
@@ -650,6 +708,16 @@ input[type=number] {
   color: var(--muted)
 }
 
+.settings-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0
+}
+
+.settings-row input {
+  flex: 1
+}
+
 .chat-view {
   flex: 1;
   min-height: 0;
@@ -659,6 +727,95 @@ input[type=number] {
   position: absolute;
   inset: 60px 0 0 58px;
   z-index: 6
+}
+
+.exam-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  position: absolute;
+  inset: 60px 0 0 58px;
+  z-index: 6
+}
+
+.exam-view.hidden {
+  display: none !important
+}
+
+.exam-head {
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--soft);
+  background: linear-gradient(180deg, var(--bg-2), var(--bg))
+}
+
+.exam-head h2 {
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px
+}
+
+.exam-head h2 svg {
+  width: 19px;
+  height: 19px;
+  color: var(--accent)
+}
+
+.exam-head p {
+  font-size: 12.5px;
+  color: var(--muted)
+}
+
+.exam-head .btn:first-of-type {
+  margin-left: auto
+}
+
+.exam-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(360px, .65fr)
+}
+
+.exam-image-box {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: #05080a;
+  border-right: 1px solid var(--soft)
+}
+
+.exam-image-box img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain
+}
+
+.exam-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow: auto
+}
+
+.exam-panel textarea {
+  resize: vertical;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 10px 12px
 }
 
 .chat-view.hidden {
@@ -776,5 +933,15 @@ input[type=number] {
 
   .topbar {
     overflow-x: auto
+  }
+
+  .exam-grid {
+    grid-template-columns: 1fr
+  }
+
+  .exam-image-box {
+    min-height: 42vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--soft)
   }
 }

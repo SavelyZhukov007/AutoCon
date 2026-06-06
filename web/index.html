@@ -16,6 +16,7 @@
       <button class="rail-btn" data-view="camera" title="Камера"><span data-icon="camera"></span></button>
       <button class="rail-btn" data-view="events" title="События"><span data-icon="sign"></span></button>
       <button class="rail-btn" data-view="chat" title="Чат по видео"><span data-icon="chat"></span></button>
+      <button class="rail-btn" data-view="exam" title="Фото ПДД"><span data-icon="image"></span></button>
       <span class="grow"></span>
       <button class="rail-btn" id="btnSettings" title="Настройки"><span data-icon="settings"></span></button>
     </nav>
@@ -26,6 +27,7 @@
         <button class="btn primary" id="btnOpen"><span data-icon="open"></span>Открыть видео</button>
         <button class="btn" id="btnAnalyze" disabled><span data-icon="scan"></span>Анализ</button>
         <button class="btn" id="btnCamera"><span data-icon="camera"></span>Камера</button>
+        <button class="btn" id="btnExam"><span data-icon="image"></span>Фото ПДД</button>
         <button class="btn ghost" id="btnExport" disabled><span data-icon="export"></span>Отчёт</button>
         <span class="grow"></span>
         <div class="env">
@@ -56,6 +58,7 @@
               <span class="tc" id="tcCur">00:00:00</span>
               <input type="range" id="seek" min="0" max="1000" value="0" />
               <span class="tc" id="tcDur">00:00:00</span>
+              <span class="rt-status" id="videoRealtimeStatus">анализ не запущен</span>
             </div>
           </div>
 
@@ -76,6 +79,18 @@
         </section>
 
         <aside class="side">
+          <div class="current-context" id="currentContext">
+            <div class="context-head">
+              <b>Сейчас</b>
+              <span id="contextConfidence">0%</span>
+            </div>
+            <p id="contextExplanation">Загрузите видео: здесь появится объяснение текущих знаков и полосы.</p>
+            <div class="context-grid">
+              <span>Полоса</span><b id="contextLane">unknown</b>
+              <span>Относится к полосе</span><b id="contextApplies">unknown</b>
+            </div>
+            <div class="context-signs" id="contextSigns"></div>
+          </div>
           <div class="tabs">
             <button class="tab active" data-pane="commentary"><span data-icon="bot"></span>Комментарий</button>
             <button class="tab" data-pane="signs"><span data-icon="sign"></span>Знаки</button>
@@ -115,6 +130,29 @@
           <button class="btn primary" id="chatSend"><span data-icon="chat"></span>Спросить</button>
         </div>
       </section>
+
+      <section id="viewExam" class="exam-view hidden">
+        <div class="exam-head">
+          <div>
+            <h2><span data-icon="image"></span> Фото ПДД</h2>
+            <p>Загрузите кадр экзаменационной ситуации и задайте вопрос. AutoCon совместит CV-детекции, локальную vision-модель Ollama и базу ПДД РФ.</p>
+          </div>
+          <button class="btn" id="examPullModel"><span data-icon="download"></span>qwen2.5vl:3b</button>
+          <button class="btn primary" id="examPick"><span data-icon="open"></span>Загрузить фото</button>
+        </div>
+        <div class="exam-grid">
+          <div class="exam-image-box">
+            <div class="empty" id="emptyExam"><span data-icon="image"></span><p>Фото ещё не загружено</p></div>
+            <img id="examImage" alt="" />
+          </div>
+          <div class="exam-panel">
+            <textarea id="examQuestion" rows="4" placeholder="Например: можно ли водителю повернуть налево в этой ситуации?"></textarea>
+            <button class="btn primary" id="examAnalyze"><span data-icon="scan"></span>Разобрать вопрос</button>
+            <div class="live-comment" id="examAnswer">Ответ появится после анализа изображения.</div>
+            <div class="list" id="examDetections"></div>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -127,6 +165,7 @@
           терминалов.</p>
         <div id="installList" class="check-list"></div>
         <h4>Модели</h4>
+        <p class="muted">Если модель дорожных знаков не скачалась из Hugging Face, её можно заменить своей `.pt` или `.onnx` через настройки/импорт модели.</p>
         <div id="modelList" class="check-list"></div>
         <div class="bar big hidden" id="installProgress"><i id="installFill"></i></div>
         <pre id="installLog" class="log hidden"></pre>

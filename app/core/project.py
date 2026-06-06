@@ -21,6 +21,8 @@ SCHEMA = {
     "vehicles": [],
     "plates": [],
     "comments": [],
+    "contexts": [],
+    "exam_cases": [],
     "summary": "",
     "exports": [],
 }

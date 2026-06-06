@@ -11,7 +11,11 @@ const state = {
   vehicles: [],
   plates: [],
   comments: [],
+  contexts: [],
+  currentContext: null,
   cameraRunning: false,
+  videoRealtimeRunning: false,
+  examImage: null,
   chatAnswerEl: null,
   chatAnswerBuf: "",
 };
@@ -32,12 +36,17 @@ function bind() {
   $("#btnAnalyze").addEventListener("click", analyze);
   $("#btnExport").addEventListener("click", exportReport);
   $("#btnCamera").addEventListener("click", () => showView("camera"));
+  $("#btnExam").addEventListener("click", () => showView("exam"));
   $("#btnPlay").addEventListener("click", togglePlay);
   $("#seek").addEventListener("input", seekVideo);
   $("#video").addEventListener("timeupdate", onVideoTime);
+  $("#video").addEventListener("play", startVideoRealtime);
   $("#video").addEventListener("loadedmetadata", () => $("#tcDur").textContent = fmt($("#video").duration));
   $("#btnStartCamera").addEventListener("click", startCamera);
   $("#btnStopCamera").addEventListener("click", stopCamera);
+  $("#examPick").addEventListener("click", pickExamImage);
+  $("#examAnalyze").addEventListener("click", analyzeExamImage);
+  $("#examPullModel").addEventListener("click", pullVisionModel);
   $("#chatRefresh").addEventListener("click", refreshChatProjects);
   $("#chatSend").addEventListener("click", sendChat);
   $("#chatQuestion").addEventListener("keydown", (e) => {
@@ -98,17 +107,38 @@ function bindBus() {
   Bus.on("process:done", (p) => {
     $("#processBox").classList.add("hidden");
     state.project = p;
+    state.detections = p.detections || state.detections || [];
     state.signSeq = p.sign_sequences || [];
     state.vehicles = p.vehicles || [];
     state.plates = p.plates || [];
     state.comments = p.comments || [];
+    state.contexts = p.contexts || state.contexts || [];
     $("#btnExport").disabled = false;
     renderAll();
   });
+  Bus.on("video:analysis_start", () => {
+    state.videoRealtimeRunning = true;
+    $("#videoRealtimeStatus").textContent = "анализ запущен";
+  });
+  Bus.on("video:analysis_status", (d) => {
+    state.videoRealtimeRunning = !!d.running;
+    const pct = Math.round((d.progress || 0) * 100);
+    $("#videoRealtimeStatus").textContent = `${d.label || "анализ"} ${pct}% · до ${fmt(d.analyzed_time || 0)}`;
+  });
+  Bus.on("video:analysis_done", (d) => {
+    state.videoRealtimeRunning = false;
+    $("#videoRealtimeStatus").textContent = d.error ? `ошибка: ${d.error}` : (d.label || "анализ готов");
+  });
   Bus.on("vision:detections", (d) => {
     state.detections.push(...(d.detections || []));
-    state.currentDetections = d.detections || [];
-    drawBoxes($("#videoOverlay"), state.currentDetections, $("#video"));
+    onVideoTime();
+  });
+  Bus.on("vision:context", (d) => {
+    state.contexts.push(d);
+    const v = $("#video");
+    if (!v.src || Math.abs((d.time || 0) - (v.currentTime || 0)) < 0.85) {
+      renderCurrentContext(d);
+    }
   });
   Bus.on("vision:event", (d) => {
     addEvent(d);
@@ -130,6 +160,22 @@ function bindBus() {
   });
   Bus.on("camera:error", (d) => {
     $("#liveComment").textContent = d.message || "Ошибка камеры";
+  });
+  Bus.on("exam:image_loaded", (d) => {
+    state.examImage = d;
+    $("#examImage").src = d.image_url || "";
+    $("#emptyExam").classList.add("hidden");
+  });
+  Bus.on("exam:analysis_start", () => {
+    $("#examAnswer").textContent = "Анализирую изображение и вопрос...";
+    $("#examDetections").innerHTML = "";
+  });
+  Bus.on("exam:analysis_done", (d) => {
+    $("#examAnswer").textContent = d.answer || "Ответ пустой.";
+    renderExamFindings(d.findings || {});
+  });
+  Bus.on("exam:error", (d) => {
+    $("#examAnswer").textContent = d.message || "Ошибка анализа фото";
   });
   Bus.on("chat:start", (d) => {
     addChatMessage("user", d.question || "");
@@ -213,18 +259,33 @@ function loadProject(p) {
   state.vehicles = p.vehicles || [];
   state.plates = p.plates || [];
   state.comments = p.comments || [];
+  state.contexts = p.contexts || [];
+  state.currentContext = null;
   $("#video").src = p.media_url;
   $("#emptyVideo").classList.add("hidden");
   $("#btnAnalyze").disabled = false;
   $("#btnExport").disabled = !state.signSeq.length && !state.vehicles.length && !state.plates.length;
   showView("video");
   renderAll();
+  renderCurrentContext(null);
+  startVideoRealtime();
   refreshChatProjects();
 }
 
 async function analyze() {
   state.detections = [];
-  await API.process_video();
+  state.contexts = [];
+  renderCurrentContext(null);
+  await startVideoRealtime(true);
+}
+
+async function startVideoRealtime(force = false) {
+  if (!state.project || !API.start_video_realtime) return;
+  if (state.videoRealtimeRunning && !force) return;
+  const res = await API.start_video_realtime(state.project.id || "");
+  if (res && res.ok === false) {
+    $("#videoRealtimeStatus").textContent = res.error || "анализ не запущен";
+  }
 }
 
 async function exportReport() {
@@ -252,6 +313,42 @@ function onVideoTime() {
   const t = v.currentTime;
   state.currentDetections = state.detections.filter((d) => Math.abs((d.time || 0) - t) < 0.35);
   drawBoxes($("#videoOverlay"), state.currentDetections, v);
+  renderCurrentContext(contextAt(t));
+}
+
+function contextAt(t) {
+  let best = null;
+  let bestDelta = Infinity;
+  for (const ctx of state.contexts || []) {
+    const delta = Math.abs((ctx.time || 0) - t);
+    if (delta < bestDelta) {
+      best = ctx;
+      bestDelta = delta;
+    }
+  }
+  return bestDelta <= 1.2 ? best : null;
+}
+
+function renderCurrentContext(ctx) {
+  state.currentContext = ctx || null;
+  if (!ctx) {
+    $("#contextExplanation").textContent = state.videoRealtimeRunning
+      ? "Анализ догоняет текущий момент видео."
+      : "Загрузите видео: здесь появится объяснение текущих знаков и полосы.";
+    $("#contextLane").textContent = "unknown";
+    $("#contextApplies").textContent = "unknown";
+    $("#contextConfidence").textContent = "0%";
+    $("#contextSigns").innerHTML = "";
+    return;
+  }
+  $("#contextExplanation").textContent = ctx.explanation || "Контекст сцены обновлён.";
+  $("#contextLane").textContent = ctx.lane?.lane || "unknown";
+  $("#contextApplies").textContent = ctx.applies_to_ego_lane || "unknown";
+  $("#contextConfidence").textContent = Math.round((ctx.confidence || 0) * 100) + "%";
+  const signs = ctx.visible_signs || [];
+  $("#contextSigns").innerHTML = signs.length
+    ? signs.map((s) => `<span>${esc(s.label)} · ${esc(s.applies_to_ego_lane || "unknown")}</span>`).join("")
+    : `<span>знаки не подтверждены</span>`;
 }
 
 async function refreshCameras() {
@@ -290,18 +387,27 @@ function drawBoxes(canvas, detections, mediaEl) {
   for (const d of detections || []) {
     const [x1, y1, x2, y2] = d.bbox || [0, 0, 0, 0];
     const x = ox + x1 * scale, y = oy + y1 * scale, w = (x2 - x1) * scale, h = (y2 - y1) * scale;
-    const color = d.kind === "sign" ? "#f0b441" : d.kind === "plate" ? "#ee5d50" : "#18b7a6";
+    const signLike = d.kind === "sign" || ["stop sign", "traffic light"].includes(String(d.label || "").toLowerCase());
+    const color = signLike ? "#f0b441" : d.kind === "plate" ? "#ee5d50" : "#18b7a6";
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.strokeRect(x, y, w, h);
     const label = `${d.label || d.kind} ${Math.round((d.confidence || 0) * 100)}%`;
     ctx.font = "12px Segoe UI";
-    const tw = ctx.measureText(label).width + 10;
+    const tw = Math.min(ctx.measureText(label).width + 10, canvas.width - 4);
+    const labelX = clamp(x, 2, Math.max(2, canvas.width - tw - 2));
+    let labelY = signLike ? y + h + 3 : y - 21;
+    if (labelY + 20 > canvas.height) labelY = y - 21;
+    labelY = clamp(labelY, 0, Math.max(0, canvas.height - 20));
     ctx.fillStyle = color;
-    ctx.fillRect(x, Math.max(0, y - 21), tw, 20);
+    ctx.fillRect(labelX, labelY, tw, 20);
     ctx.fillStyle = "#061412";
-    ctx.fillText(label, x + 5, Math.max(14, y - 7));
+    ctx.fillText(label, labelX + 5, labelY + 14);
   }
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function addEvent(e) {
@@ -339,6 +445,7 @@ function showView(name) {
   $("#viewVideo").classList.toggle("hidden", name !== "video" && name !== "events");
   $("#viewCamera").classList.toggle("hidden", name !== "camera");
   $("#viewChat").classList.toggle("hidden", name !== "chat");
+  $("#viewExam").classList.toggle("hidden", name !== "exam");
   if (name === "events") showPane("events");
   if (name === "chat") refreshChatProjects();
 }
@@ -359,8 +466,12 @@ function openSettings() {
       <label>YOLO imgsz</label><input data-k="imgsz" type="number" min="320" step="32" value="${esc(s.imgsz ?? 960)}" />
       <label>Confidence</label><input data-k="conf" type="number" min="0.05" max="0.95" step="0.05" value="${esc(s.conf ?? 0.35)}" />
       <label>Tracker</label><select data-k="tracker"><option>bytetrack.yaml</option><option>botsort.yaml</option></select>
+      <label>Знаки .pt/.onnx</label><div class="settings-row"><input data-k="traffic_sign_model" type="text" value="${esc(s.traffic_sign_model || "")}" /><button class="btn" type="button" data-import-model="traffic">Импорт</button></div>
+      <label>Номера .pt/.onnx</label><div class="settings-row"><input data-k="plate_model" type="text" value="${esc(s.plate_model || "")}" /><button class="btn" type="button" data-import-model="plate">Импорт</button></div>
+      <label>VehicleDINO .onnx</label><div class="settings-row"><input data-k="vehicle_dino_model" type="text" value="${esc(s.vehicle_dino_model || "")}" /><button class="btn" type="button" data-import-model="vehicle_dino">Импорт</button></div>
       <label>Ollama host</label><input data-k="ollama_host" type="text" value="${esc(s.ollama_host || "http://127.0.0.1:11434")}" />
       <label>Ollama model</label><input data-k="ollama_model" type="text" value="${esc(s.ollama_model || "")}" placeholder="qwen2.5:3b" />
+      <label>Vision model</label><input data-k="vision_model" type="text" value="${esc(s.vision_model || "qwen2.5vl:3b")}" placeholder="qwen2.5vl:3b" />
       <label>Комментарий</label><select data-k="commentary_enabled"><option value="true">on</option><option value="false">off</option></select>
       <label>Голос</label><select data-k="voice_enabled"><option value="false">off</option><option value="true">on</option></select>
     </div>`;
@@ -368,7 +479,17 @@ function openSettings() {
   $(`[data-k=tracker]`).value = s.tracker || "bytetrack.yaml";
   $(`[data-k=commentary_enabled]`).value = String(s.commentary_enabled !== false);
   $(`[data-k=voice_enabled]`).value = String(!!s.voice_enabled);
+  $$("[data-import-model]", $("#settingsForm")).forEach((btn) => btn.addEventListener("click", importModelFromSettings));
   $("#settingsOverlay").classList.add("open");
+}
+
+async function importModelFromSettings(e) {
+  const kind = e.currentTarget.dataset.importModel;
+  const res = await API.import_model_pack(kind);
+  if (!res?.ok) return;
+  const map = { traffic: "traffic_sign_model", plate: "plate_model", vehicle_dino: "vehicle_dino_model" };
+  const key = map[kind];
+  if (key) $(`[data-k=${key}]`).value = res.path || "";
 }
 
 async function saveSettings() {
@@ -419,4 +540,45 @@ async function sendChat() {
   if (res && res.ok === false) {
     addChatMessage("ai", res.error || "Не удалось отправить вопрос", "Ошибка");
   }
+}
+
+async function pickExamImage() {
+  const res = await API.pick_exam_image();
+  if (!res) return;
+  state.examImage = res;
+  $("#examImage").src = res.image_url || "";
+  $("#emptyExam").classList.add("hidden");
+}
+
+async function analyzeExamImage() {
+  const question = $("#examQuestion").value.trim();
+  if (!question) {
+    $("#examAnswer").textContent = "Введите вопрос по изображению.";
+    return;
+  }
+  const res = await API.analyze_exam_image(question);
+  if (res && res.ok === false) {
+    $("#examAnswer").textContent = res.error || "Не удалось начать анализ.";
+  }
+}
+
+async function pullVisionModel() {
+  const model = state.settings.vision_model || "qwen2.5vl:3b";
+  $("#examAnswer").textContent = `Скачиваю vision-модель ${model} через Ollama...`;
+  await API.pull_vision_model(model);
+}
+
+function renderExamFindings(findings) {
+  const rows = [];
+  for (const det of findings.detections || []) {
+    rows.push(`<div class="item ${esc(det.kind || "")}"><b>${esc(det.label || det.kind)}</b><div class="meta">${esc(det.kind || "")} · ${esc(det.position || "")} · ${Math.round((det.confidence || 0) * 100)}%</div></div>`);
+  }
+  const ctx = findings.context;
+  if (ctx?.explanation) {
+    rows.unshift(`<div class="item sign"><b>Контекст</b><div>${esc(ctx.explanation)}</div><div class="meta">полоса: ${esc(ctx.lane?.lane || "unknown")} · применимость: ${esc(ctx.applies_to_ego_lane || "unknown")}</div></div>`);
+  }
+  if (findings.vision_error) {
+    rows.push(`<div class="item"><b>CV предупреждение</b><div class="meta">${esc(findings.vision_error)}</div></div>`);
+  }
+  $("#examDetections").innerHTML = rows.length ? rows.join("") : `<div class="item">CV-детекции не найдены, ответ построен по vision-модели.</div>`;
 }

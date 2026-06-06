@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import threading
 import traceback
 from pathlib import Path
@@ -15,7 +16,7 @@ except Exception:  # pragma: no cover - tests can run without pywebview
 
 from . import config
 from .core import device, export, install, llm, media, model_registry, project, server
-from .core.vision import CameraWorker, EventAggregator, VisionEngine
+from .core.vision import CameraWorker, EventAggregator, VideoAnalysisSession, VisionEngine
 
 
 def _json(data) -> str:
@@ -30,6 +31,8 @@ class Api:
         self._server.set_data_root(config.user_data_dir())
         self._llm: llm.OllamaClient | None = None
         self._camera: CameraWorker | None = None
+        self._video_session: VideoAnalysisSession | None = None
+        self._exam_image: str = ""
         self._busy = False
 
     # ------------------------------------------------------------------ events
@@ -168,7 +171,10 @@ class Api:
         path = str(picked[0])
         mapping = {
             "traffic": "traffic_sign_model",
+            "traffic_signs_100": "traffic_sign_model",
+            "sign": "traffic_sign_model",
             "plate": "plate_model",
+            "license_plate": "plate_model",
             "vehicle_dino": "vehicle_dino_model",
         }
         if kind in mapping:
@@ -210,6 +216,25 @@ class Api:
         self._bg(run)
         return {"ok": True}
 
+    def pull_vision_model(self, name: str = "") -> dict:
+        model = name or self.settings.get("vision_model", "qwen2.5vl:3b")
+        self._emit("pull:start", {"model": model})
+
+        def progress(f: float, text: str) -> None:
+            self._emit("pull:progress", {"progress": f, "text": text, "model": model})
+
+        def run() -> None:
+            res = self._get_llm().pull(model, on_progress=progress)
+            self._emit("pull:done", res)
+
+        self._bg(run)
+        return {"ok": True}
+
+    def set_vision_model(self, name: str) -> str:
+        model = name or "qwen2.5vl:3b"
+        self.update_settings({"vision_model": model})
+        return model
+
     # -------------------------------------------------------------------- media
     def list_projects(self) -> list[dict]:
         return project.list_projects()
@@ -236,6 +261,7 @@ class Api:
         window = self._window()
         if not window:
             return None
+        self.stop_video_realtime()
         file_types = ("Видео (*.mp4;*.mkv;*.mov;*.avi;*.webm)", "Все файлы (*.*)")
         picked = window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types
@@ -247,6 +273,7 @@ class Api:
         return self._project_payload(self.project)
 
     def open_project(self, project_id: str) -> dict:
+        self.stop_video_realtime()
         self.project = project.load(project_id)
         return self._project_payload(self.project)
 
@@ -260,9 +287,66 @@ class Api:
         return {**data, "media_url": self.media_uri(data["source_path"])}
 
     # ------------------------------------------------------------------ vision
+    def start_video_realtime(self, project_id: str = "") -> dict:
+        if project_id:
+            if not self.project or self.project.get("id") != project_id:
+                self.project = project.load(project_id)
+        if not self.project:
+            return {"ok": False, "error": "Нет открытого видео"}
+        if self._video_session and self._video_session.status().get("running"):
+            if self._video_session.project_id == self.project.get("id"):
+                return {"ok": True, "status": self._video_session.status()}
+            self._video_session.stop()
+
+        session = VideoAnalysisSession(
+            self.project["id"],
+            self.project["source_path"],
+            dict(self.settings),
+            self._video_event,
+            self._video_analysis_done,
+        )
+        self._video_session = session
+        session.start()
+        return {"ok": True, "status": session.status()}
+
+    def stop_video_realtime(self) -> dict:
+        if self._video_session:
+            self._video_session.stop()
+            status = self._video_session.status()
+            self._video_session = None
+            return {"ok": True, "status": status}
+        return {"ok": True, "status": {"running": False}}
+
+    def video_realtime_status(self) -> dict:
+        if not self._video_session:
+            return {"running": False}
+        return self._video_session.status()
+
+    def _video_event(self, event: str, payload: dict) -> None:
+        self._emit(event, payload)
+        if event == "vision:scene" and self.settings.get("commentary_enabled", True):
+            self._bg(self._comment_scene, payload)
+
+    def _video_analysis_done(self, result: dict) -> None:
+        if not self.project or result.get("project_id") != self.project.get("id"):
+            return
+        comments = list(self.project.get("comments", []))
+        for key, value in result.items():
+            if key in {"project_id", "status", "comments"}:
+                continue
+            self.project[key] = value
+        if result.get("comments"):
+            comments.extend(result["comments"])
+        self.project["comments"] = comments
+        if not result.get("cancelled"):
+            self._summarize_project()
+        project.save(self.project)
+        self._emit("process:done", self._project_payload(self.project))
+
     def process_video(self) -> dict:
         if not self.project:
             return {"ok": False, "error": "Нет открытого видео"}
+        self.stop_video_realtime()
         if self._busy:
             return {"ok": False, "error": "Анализ уже идёт"}
         self._busy = True
@@ -296,6 +380,69 @@ class Api:
             self._emit("process:done", self._project_payload(self.project))
         finally:
             self._busy = False
+
+    def pick_exam_image(self) -> dict | None:
+        window = self._window()
+        if not window:
+            return None
+        file_types = ("Изображения (*.jpg;*.jpeg;*.png;*.webp)", "Все файлы (*.*)")
+        picked = window.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types
+        )
+        if not picked:
+            return None
+        self._exam_image = str(picked[0])
+        payload = {"ok": True, "path": self._exam_image, "image_url": self.media_uri(self._exam_image)}
+        self._emit("exam:image_loaded", payload)
+        return payload
+
+    def analyze_exam_image(self, question: str) -> dict:
+        if not self._exam_image:
+            return {"ok": False, "error": "Сначала загрузите изображение"}
+        if not (question or "").strip():
+            return {"ok": False, "error": "Введите вопрос по картинке"}
+        self._emit("exam:analysis_start", {"path": self._exam_image, "question": question})
+        self._bg(self._analyze_exam_image_bg, self._exam_image, question.strip())
+        return {"ok": True}
+
+    def _analyze_exam_image_bg(self, image_path: str, question: str) -> None:
+        try:
+            findings = {
+                "detections": [],
+                "context": {},
+                "pdd_version": llm.PDD_RU_CONTEXT["version"],
+            }
+            try:
+                engine = VisionEngine(self.settings, on_event=lambda _e, _p: None)
+                findings.update(engine.analyze_image(image_path))
+            except Exception as exc:
+                findings["vision_error"] = str(exc)
+
+            cli = self._get_llm()
+            if not cli.available():
+                raise RuntimeError("Ollama недоступна. Запустите Ollama или скачайте vision-модель.")
+            image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+            model = self.settings.get("vision_model") or "qwen2.5vl:3b"
+            answer = cli.generate(
+                llm.prompt_exam_photo(question, findings),
+                system=llm.SYS_AUTOCON,
+                model=model,
+                images=[image_b64],
+                temperature=0.15,
+            ).strip()
+            case = {
+                "image_path": image_path,
+                "question": question,
+                "answer": answer,
+                "findings": findings,
+                "vision_model": model,
+            }
+            if self.project is not None:
+                self.project.setdefault("exam_cases", []).append(case)
+                project.save(self.project)
+            self._emit("exam:analysis_done", case)
+        except Exception as exc:
+            self._emit("exam:error", {"message": str(exc)})
 
     def _comment_scene(self, snapshot: dict) -> None:
         text = self._scene_text(snapshot)
@@ -412,6 +559,26 @@ class Api:
             self._camera.stop()
             self._camera = None
         return {"ok": True}
+
+    def import_model_pack(self, kind: str, path: str = "") -> dict | None:
+        if not path:
+            return self.import_user_model(kind)
+        model_path = Path(path)
+        if not model_path.exists() or model_path.suffix.lower() not in {".pt", ".onnx"}:
+            return {"ok": False, "error": "Выберите существующий .pt или .onnx файл"}
+        mapping = {
+            "traffic": "traffic_sign_model",
+            "traffic_signs_100": "traffic_sign_model",
+            "sign": "traffic_sign_model",
+            "plate": "plate_model",
+            "license_plate": "plate_model",
+            "vehicle_dino": "vehicle_dino_model",
+        }
+        key = mapping.get(kind)
+        if not key:
+            return {"ok": False, "error": "Неизвестный тип модели"}
+        self.update_settings({key: str(model_path)})
+        return {"ok": True, "path": str(model_path), "settings_key": key}
 
     # ------------------------------------------------------------------ export
     def export_report(self, fmt: str = "md") -> dict:

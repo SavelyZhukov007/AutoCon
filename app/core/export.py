@@ -43,6 +43,22 @@ def to_markdown(project: dict) -> str:
     lines += ["", "## Комментарии", ""]
     for item in project.get("comments", []):
         lines.append(f"- `{ts(item.get('t', 0))}` {item.get('text', '')}")
+    lines += ["", "## Контекст полосы и знаков", ""]
+    contexts = project.get("contexts", [])
+    if not contexts:
+        lines.append("_Нет сохранённого контекста._")
+    for ctx in contexts[:80]:
+        lane = (ctx.get("lane") or {}).get("lane", "unknown")
+        lines.append(
+            f"- `{ts(ctx.get('time', 0))}` lane={lane} · applies={ctx.get('applies_to_ego_lane', 'unknown')} · {ctx.get('explanation', '')}"
+        )
+    lines += ["", "## Фото ПДД", ""]
+    cases = project.get("exam_cases", [])
+    if not cases:
+        lines.append("_Фото-вопросы не сохранялись._")
+    for case in cases:
+        lines.append(f"- **Вопрос:** {case.get('question', '')}")
+        lines.append(f"  **Ответ:** {case.get('answer', '')}")
     return "\n".join(lines)
 
 

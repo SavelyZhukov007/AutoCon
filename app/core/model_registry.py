@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import shutil
+import json
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -21,13 +22,32 @@ PACKS = {
     },
     "traffic_signs_100": {
         "title": "Дорожные знаки 100 классов",
-        "desc": "Community YOLO-веса для стартового распознавания дорожных знаков; можно заменить своими.",
+        "desc": "Community YOLO-веса для стартового распознавания дорожных знаков; если Hub недоступен, импортируйте свои .pt/.onnx.",
         "recommended": True,
         "settings_key": "traffic_sign_model",
         "target": "traffic-signs-100.pt",
         "kind": "hf",
         "repo": "RZhukotynskyi/sign-detection-yolov8s",
-        "filenames": ["best.pt", "model.pt", "sign-detection-yolov8s.pt"],
+        "filenames": ["sdv4.pt", "sdv3.pt", "sdv4.onnx"],
+        "repos": [
+            {
+                "repo": "RZhukotynskyi/sign-detection-yolov8s",
+                "filenames": ["sdv4.pt", "sdv3.pt", "sdv4.onnx"],
+            },
+            {
+                "repo": "Phearith/Traffic_Sign_Detection_Using_YOLOv8",
+                "filenames": ["best_yolov8m.pt"],
+            },
+            {
+                "repo": "cvtechniques/JC-Traffic-Sign-Detection",
+                "filenames": [
+                    "trainv11/weights/best.pt",
+                    "trainv26/weights/best.pt",
+                    "trainv8/weights/best.pt",
+                ],
+            },
+        ],
+        "manual_import": True,
     },
     "license_plate": {
         "title": "Детектор номерных знаков",
@@ -74,9 +94,42 @@ def list_packs(settings: Optional[dict] = None) -> list[dict]:
                 "installed": target.exists() or (key == "yolo11s" and bool(active)),
                 "active": active,
                 "kind": meta["kind"],
+                "manual_import": bool(meta.get("manual_import")),
             }
         )
     return items
+
+
+def candidate_repos(meta: dict) -> list[dict]:
+    if meta.get("repos"):
+        return list(meta["repos"])
+    return [{"repo": meta.get("repo", ""), "filenames": meta.get("filenames") or [meta["target"]]}]
+
+
+def pick_existing_hf_file(runtime_python: Path, repo: str, filenames: list[str]) -> dict:
+    script = (
+        "import json\n"
+        "from huggingface_hub import HfApi\n"
+        f"repo={repo!r}\n"
+        f"wanted={filenames!r}\n"
+        "files=set(HfApi().list_repo_files(repo_id=repo))\n"
+        "match=next((name for name in wanted if name in files), '')\n"
+        "print(json.dumps({'match': match, 'files': sorted(files)}))\n"
+    )
+    result = run_hidden([str(runtime_python), "-c", script], timeout=120)
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stdout[-1000:]}
+    try:
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"ok": False, "error": result.stdout[-1000:]}
+    if not data.get("match"):
+        visible = ", ".join(data.get("files", [])[:8])
+        return {
+            "ok": False,
+            "error": f"В репозитории {repo} не найдены ожидаемые веса. Есть: {visible}",
+        }
+    return {"ok": True, "filename": data["match"]}
 
 
 def install_pack(
@@ -111,24 +164,37 @@ def install_pack(
             progress(1.0, "Модель установлена")
             return {"ok": True, "path": str(target)}
 
-        progress(0.1, "Загрузка через Hugging Face Hub")
-        filenames = meta.get("filenames") or [meta["target"]]
+        progress(0.1, "Проверка файлов Hugging Face Hub")
         last_error = ""
-        for filename in filenames:
+        for repo_index, candidate in enumerate(candidate_repos(meta)):
+            repo = candidate["repo"]
+            filenames = candidate.get("filenames") or [meta["target"]]
+            picked = pick_existing_hf_file(runtime_python, repo, filenames)
+            if not picked.get("ok"):
+                last_error = picked.get("error", "")
+                continue
+            filename = picked["filename"]
+            progress(
+                0.25 + repo_index * 0.1,
+                f"Загрузка {repo}/{filename}",
+            )
             script = (
                 "from huggingface_hub import hf_hub_download\n"
                 "import shutil\n"
-                f"p=hf_hub_download(repo_id={meta['repo']!r}, filename={filename!r})\n"
+                f"p=hf_hub_download(repo_id={repo!r}, filename={filename!r})\n"
                 f"shutil.copy2(p, {str(target)!r})\n"
             )
             result = run_hidden([str(runtime_python), "-c", script], timeout=1800)
             if result.returncode == 0 and target.exists():
                 progress(1.0, "Модель установлена")
-                return {"ok": True, "path": str(target), "filename": filename}
+                return {"ok": True, "path": str(target), "repo": repo, "filename": filename}
             last_error = result.stdout[-1000:]
         return {
             "ok": False,
-            "error": last_error or "Не удалось найти файл модели в репозитории",
+            "error": (
+                last_error
+                or "Не удалось найти файл модели. Можно импортировать свои .pt/.onnx в настройках."
+            ),
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

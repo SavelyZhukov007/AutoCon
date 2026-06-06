@@ -41,7 +41,7 @@ function mockApi() {
   return {
     async environment() {
       return {
-        settings: { device: "auto", target_fps: 8, imgsz: 960, conf: 0.35, tracker: "bytetrack.yaml", commentary_enabled: true },
+        settings: { device: "auto", target_fps: 8, imgsz: 960, conf: 0.35, tracker: "bytetrack.yaml", commentary_enabled: true, vision_model: "qwen2.5vl:3b" },
         first_run_done: true,
         ffmpeg: true,
         device: { selected_device: "preview", gpus: [] },
@@ -55,6 +55,9 @@ function mockApi() {
     async list_camera_devices() { return [{ index: 0, name: "Preview camera" }]; },
     async pick_video() { return null; },
     async process_video() { return { ok: false, error: "preview" }; },
+    async start_video_realtime() { return { ok: false, error: "preview" }; },
+    async stop_video_realtime() { return { ok: true }; },
+    async video_realtime_status() { return { running: false }; },
     async export_report() { return { ok: false, error: "preview" }; },
     async start_camera() { return { ok: true }; },
     async stop_camera() { return { ok: true }; },
@@ -64,5 +67,10 @@ function mockApi() {
     async install_model_pack() { return { ok: true }; },
     async list_chat_projects() { return []; },
     async chat_about_project() { return { ok: false, error: "preview" }; },
+    async pick_exam_image() { return null; },
+    async analyze_exam_image() { return { ok: false, error: "preview" }; },
+    async pull_vision_model() { return { ok: true }; },
+    async set_vision_model(name) { return name || "qwen2.5vl:3b"; },
+    async import_model_pack() { return { ok: true }; },
   };
 }
