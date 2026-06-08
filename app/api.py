@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import base64
+import logging
+import shutil
 import threading
 import traceback
 from pathlib import Path
@@ -15,8 +17,17 @@ except Exception:  # pragma: no cover - tests can run without pywebview
     webview = None
 
 from . import config
-from .core import device, export, install, llm, media, model_registry, project, server
-from .core.vision import CameraWorker, EventAggregator, VideoAnalysisSession, VisionEngine
+from .core import device, export, install, llm, media, model_registry, project, runtime, server
+from .core.vision import (
+    CameraWorker,
+    EventAggregator,
+    VideoAnalysisSession,
+    VisionEngine,
+    sign_description,
+)
+
+
+LOG = logging.getLogger(__name__)
 
 
 def _json(data) -> str:
@@ -25,6 +36,7 @@ def _json(data) -> str:
 
 class Api:
     def __init__(self) -> None:
+        config.bootstrap_logging()
         self.settings = config.load_settings()
         self.project: dict | None = None
         self._server = server.MediaServer()
@@ -34,6 +46,7 @@ class Api:
         self._video_session: VideoAnalysisSession | None = None
         self._exam_image: str = ""
         self._busy = False
+        self._installing = False
 
     # ------------------------------------------------------------------ events
     def _window(self):
@@ -61,6 +74,7 @@ class Api:
         try:
             fn(*args, **kwargs)
         except Exception as exc:
+            LOG.exception("Background task failed: %s", getattr(fn, "__name__", fn))
             self._emit("error", {"message": str(exc), "trace": traceback.format_exc()})
 
     # --------------------------------------------------------------- settings/env
@@ -72,11 +86,67 @@ class Api:
         self._llm = None
         return self.settings
 
+    def _required_ollama_models(self) -> list[str]:
+        names = [
+            self.settings.get("default_model") or "qwen2.5:3b",
+            self.settings.get("vision_model") or "qwen2.5vl:3b",
+        ]
+        return list(dict.fromkeys(name for name in names if name))
+
+    def first_run_readiness(self) -> dict:
+        cli = self._get_llm()
+        packages = install.check()
+        runtime_health = runtime.health_check(runtime.ALL_FEATURE_KEYS)
+        model_packs = model_registry.list_packs(self.settings)
+        missing_packs = [pack for pack in model_packs if not pack.get("installed")]
+        ollama_available = cli.available()
+        ollama_models = cli.list_models() if ollama_available else []
+        required_ollama = self._required_ollama_models()
+        missing_ollama = [
+            name
+            for name in required_ollama
+            if name not in ollama_models or not cli.model_in_central_store(name)
+        ]
+        central_ollama = cli.central_store_status(required_ollama)
+        full_log = config.full_log_path()
+        ok = bool(
+            runtime_health.get("ok")
+            and not missing_packs
+            and ollama_available
+            and not missing_ollama
+            and central_ollama.get("ok")
+            and full_log.exists()
+        )
+        return {
+            "ok": ok,
+            "packages": packages,
+            "runtime_health": runtime_health,
+            "model_packs": model_packs,
+            "missing_model_packs": missing_packs,
+            "ollama": ollama_available,
+            "ollama_models": ollama_models,
+            "required_ollama_models": required_ollama,
+            "missing_ollama_models": missing_ollama,
+            "central_ollama": central_ollama,
+            "full_log": str(full_log),
+            "full_log_exists": full_log.exists(),
+        }
+
     def environment(self) -> dict:
         build_id = config.current_build_id()
+        readiness = self.first_run_readiness()
+        build_matches = build_id == "source" or self.settings.get("build_id") == build_id
+        if readiness.get("ok") and (
+            not self.settings.get("first_run_done") or not build_matches
+        ):
+            self.settings = config.save_settings(
+                {"first_run_done": True, "build_id": build_id}
+            )
+            build_matches = True
         first_run_done = bool(
             self.settings.get("first_run_done")
-            and (build_id == "source" or self.settings.get("build_id") == build_id)
+            and build_matches
+            and readiness.get("ok")
         )
         if not first_run_done:
             device.detect(force=True)
@@ -84,7 +154,15 @@ class Api:
         return {
             "settings": self.settings,
             "first_run_done": first_run_done,
+            "first_run_readiness": readiness,
             "build_id": build_id,
+            "paths": {
+                "user_data": str(config.user_data_dir()),
+                "runtime": str(config.runtime_dir()),
+                "models": str(config.models_dir()),
+                "ollama_models": str(config.ollama_models_dir()),
+                "full_log": str(config.full_log_path()),
+            },
             "ffmpeg": media.has_ffmpeg(),
             "device": device.summary(self.settings),
             "packages": install.check(),
@@ -100,6 +178,13 @@ class Api:
         }
 
     def finish_first_run(self) -> bool:
+        readiness = self.first_run_readiness()
+        if not readiness.get("ok"):
+            config.log_event(
+                "finish_first_run refused: " + json.dumps(readiness, ensure_ascii=False),
+                level=logging.WARNING,
+            )
+            return False
         self.settings = config.save_settings(
             {"first_run_done": True, "build_id": config.current_build_id()}
         )
@@ -125,6 +210,15 @@ class Api:
     def list_model_packs(self) -> list[dict]:
         return model_registry.list_packs(self.settings)
 
+    def _apply_model_result(self, key: str, res: dict) -> None:
+        if not res.get("ok"):
+            return
+        meta = model_registry.PACKS.get(key, {})
+        settings_key = meta.get("settings_key")
+        value = res.get("path")
+        if settings_key and value:
+            self.update_settings({settings_key: str(Path(value))})
+
     def install_model_pack(self, key: str) -> dict:
         self._emit("model:start", {"key": key})
 
@@ -143,20 +237,180 @@ class Api:
                 )
                 return
             res = model_registry.install_pack(key, runtime_python, on_progress=progress)
-            if res.get("ok"):
-                meta = model_registry.PACKS.get(key, {})
-                settings_key = meta.get("settings_key")
-                if settings_key:
-                    value = res.get("path")
-                    if value and not res.get("virtual"):
-                        value = str(Path(value))
-                    self.update_settings(
-                        {settings_key: value or meta.get("target", "")}
-                    )
+            self._apply_model_result(key, res)
             self._emit("model:done", res)
 
         self._bg(run)
         return {"ok": True}
+
+    def install_everything(self) -> dict:
+        if self._installing:
+            return {"ok": False, "error": "setup already running"}
+        self._installing = True
+        self._emit(
+            "setup:start",
+            {
+                "features": list(runtime.ALL_FEATURE_KEYS),
+                "model_packs": list(model_registry.ALL_PACK_KEYS),
+                "ollama_models": self._required_ollama_models(),
+            },
+        )
+        self._bg(self._install_everything_bg)
+        return {"ok": True}
+
+    def _setup_progress(self, progress: float, text: str, **extra) -> None:
+        payload = {"progress": max(0.0, min(1.0, progress)), "text": text}
+        payload.update(extra)
+        self._emit("setup:progress", payload)
+
+    def _install_everything_bg(self) -> None:
+        failures: list[dict] = []
+        try:
+            config.bootstrap_logging()
+            features = list(runtime.ALL_FEATURE_KEYS)
+            packs = list(model_registry.ALL_PACK_KEYS)
+            ollama_models = self._required_ollama_models()
+            total_steps = 1 + len(packs) + len(ollama_models)
+
+            def runtime_progress(payload: dict) -> None:
+                self._emit("install:progress", payload)
+                inner = float(payload.get("progress") or 0)
+                self._setup_progress(
+                    inner / total_steps,
+                    payload.get("text") or "Installing runtime",
+                    phase="runtime",
+                    log_path=payload.get("log_path"),
+                )
+
+            self._setup_progress(0.0, "Installing runtime", phase="runtime")
+            runtime_res = install.install(
+                features, on_progress=runtime_progress, gpu=True
+            )
+            self._emit("install:done", runtime_res)
+            if not runtime_res.get("ok"):
+                failures.append({"phase": "runtime", "result": runtime_res})
+            device.detect(force=True)
+
+            runtime_python = config.runtime_python()
+            if not runtime_python.exists():
+                failures.append(
+                    {"phase": "models", "error": "Runtime Python was not created."}
+                )
+            else:
+                for index, key in enumerate(packs, start=1):
+                    step_offset = index
+
+                    def model_progress(payload: dict, *, step_offset=step_offset) -> None:
+                        self._emit("model:progress", payload)
+                        inner = float(payload.get("progress") or 0)
+                        self._setup_progress(
+                            (step_offset + inner) / total_steps,
+                            payload.get("text") or f"Installing {key}",
+                            phase="model",
+                            pack=key,
+                        )
+
+                    self._emit("model:start", {"key": key})
+                    self._setup_progress(
+                        step_offset / total_steps, f"Installing model pack {key}", phase="model", pack=key
+                    )
+                    res = model_registry.install_pack(
+                        key, runtime_python, on_progress=model_progress
+                    )
+                    self._apply_model_result(key, res)
+                    self._emit("model:done", res)
+                    if not res.get("ok"):
+                        failures.append({"phase": "model", "key": key, "result": res})
+
+            cli = self._get_llm()
+            migration = llm.migrate_legacy_store_to_central(ollama_models)
+            if migration.get("ok"):
+                self._setup_progress(
+                    (1 + len(packs)) / total_steps,
+                    "Migrated existing Ollama models to AutoCon",
+                    phase="ollama",
+                    log_path=str(config.full_log_path()),
+                )
+            if not cli.available():
+                failures.append(
+                    {
+                        "phase": "ollama",
+                        "error": (
+                            "Ollama is not available. Start Ollama with OLLAMA_MODELS="
+                            + str(config.ollama_models_dir())
+                        ),
+                    }
+                )
+            else:
+                for offset, name in enumerate(ollama_models, start=1 + len(packs)):
+                    self._emit("pull:start", {"model": name})
+
+                    def pull_progress(f: float, text: str, *, name=name, offset=offset) -> None:
+                        self._emit(
+                            "pull:progress",
+                            {"progress": f, "text": text, "model": name},
+                        )
+                        self._setup_progress(
+                            (offset + float(f or 0)) / total_steps,
+                            text or f"Pulling {name}",
+                            phase="ollama",
+                            model=name,
+                        )
+
+                    if name in cli.list_models() and cli.model_in_central_store(name):
+                        res = {"ok": True, "model": name, "already": True}
+                    else:
+                        res = cli.pull(name, on_progress=pull_progress)
+                    self._emit("pull:done", res)
+                    if not res.get("ok"):
+                        failures.append({"phase": "ollama", "model": name, "result": res})
+
+            readiness = self.first_run_readiness()
+            ok = not failures and readiness.get("ok")
+            if ok:
+                self.settings = config.save_settings(
+                    {"first_run_done": True, "build_id": config.current_build_id()}
+                )
+            result = {
+                "ok": ok,
+                "failed": failures,
+                "readiness": readiness,
+                "target": str(config.user_data_dir()),
+                "log_path": str(config.full_log_path()),
+            }
+            self._setup_progress(1.0, "Setup complete" if ok else "Setup failed", phase="done")
+            config.log_event("install_everything result: " + json.dumps(result, ensure_ascii=False))
+            self._emit("setup:done", result)
+        except Exception as exc:
+            LOG.exception("install_everything failed")
+            self._emit(
+                "setup:done",
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "trace": traceback.format_exc(),
+                    "log_path": str(config.full_log_path()),
+                },
+            )
+        finally:
+            self._installing = False
+
+    def _centralize_user_model(self, path: str | Path) -> Path:
+        source = Path(path)
+        target_dir = config.models_dir() / "user-imports"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / source.name
+        if target.exists() and source.resolve() != target.resolve():
+            stem = source.stem
+            suffix = source.suffix
+            idx = 1
+            while target.exists():
+                target = target_dir / f"{stem}-{idx}{suffix}"
+                idx += 1
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        config.log_event(f"User model imported: {source} -> {target}")
+        return target
 
     def import_user_model(self, kind: str) -> dict | None:
         window = self._window()
@@ -168,7 +422,7 @@ class Api:
         )
         if not picked:
             return None
-        path = str(picked[0])
+        path = self._centralize_user_model(picked[0])
         mapping = {
             "traffic": "traffic_sign_model",
             "traffic_signs_100": "traffic_sign_model",
@@ -178,8 +432,8 @@ class Api:
             "vehicle_dino": "vehicle_dino_model",
         }
         if kind in mapping:
-            self.update_settings({mapping[kind]: path})
-        return {"ok": True, "path": path}
+            self.update_settings({mapping[kind]: str(path)})
+        return {"ok": True, "path": str(path)}
 
     # ------------------------------------------------------------------- Ollama
     def _get_llm(self) -> llm.OllamaClient:
@@ -378,6 +632,12 @@ class Api:
             self._summarize_project()
             project.save(self.project)
             self._emit("process:done", self._project_payload(self.project))
+        except Exception as exc:
+            LOG.exception("Video processing failed")
+            self._emit(
+                "process:error",
+                {"message": str(exc), "trace": traceback.format_exc()},
+            )
         finally:
             self._busy = False
 
@@ -523,6 +783,55 @@ class Api:
         except Exception as exc:
             self._emit("chat:error", {"message": str(exc)})
 
+    def _context_near_time(self, data: dict | None, t: float) -> dict | None:
+        contexts = (data or {}).get("contexts", [])
+        best = None
+        best_delta = 999999.0
+        for ctx in contexts:
+            delta = abs(float(ctx.get("time") or 0) - float(t or 0))
+            if delta < best_delta:
+                best = ctx
+                best_delta = delta
+        return best if best_delta <= 1.5 else None
+
+    def explain_sign(
+        self,
+        project_id: str = "",
+        detection: dict | None = None,
+        context: dict | None = None,
+        time: float = 0.0,
+    ) -> dict:
+        detection = detection or {}
+        label = str(detection.get("label") or detection.get("kind") or "sign")
+        data = self.project
+        if project_id and (not data or data.get("id") != project_id):
+            try:
+                data = project.load(project_id)
+            except Exception:
+                data = self.project
+        ctx = context or self._context_near_time(data, float(time or detection.get("time") or 0))
+        fallback = f"Знак {label}: {sign_description(label)}."
+        if ctx and ctx.get("explanation"):
+            fallback += " " + str(ctx.get("explanation"))
+        cli = self._get_llm()
+        if not cli.available():
+            return {"ok": True, "answer": fallback, "fallback": True}
+        try:
+            answer = cli.generate(
+                llm.prompt_sign_explanation(detection, ctx, data),
+                system=llm.SYS_AUTOCON,
+                temperature=0.15,
+            ).strip()
+            return {"ok": True, "answer": answer or fallback, "fallback": not bool(answer)}
+        except Exception as exc:
+            LOG.exception("Sign explanation failed")
+            return {
+                "ok": True,
+                "answer": fallback,
+                "fallback": True,
+                "error": str(exc),
+            }
+
     def list_camera_devices(self) -> list[dict]:
         return media.list_cameras()
 
@@ -577,8 +886,9 @@ class Api:
         key = mapping.get(kind)
         if not key:
             return {"ok": False, "error": "Неизвестный тип модели"}
-        self.update_settings({key: str(model_path)})
-        return {"ok": True, "path": str(model_path), "settings_key": key}
+        central_path = self._centralize_user_model(model_path)
+        self.update_settings({key: str(central_path)})
+        return {"ok": True, "path": str(central_path), "settings_key": key}
 
     # ------------------------------------------------------------------ export
     def export_report(self, fmt: str = "md") -> dict:

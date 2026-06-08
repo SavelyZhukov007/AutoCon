@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .. import config
-from . import device, model_registry
+from . import device, media, model_registry
 
 VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle", "bicycle", "train"}
 SIGN_OBJECT_LABELS = {"stop sign", "traffic light"}
@@ -752,13 +752,14 @@ class CameraWorker:
             return
         try:
             self.engine = VisionEngine(self.settings, on_event=self.emit)
-            cap = cv2.VideoCapture(int(self.camera_index), cv2.CAP_DSHOW)
+            cap, backend = media.open_camera(int(self.camera_index))
             if not cap.isOpened():
                 self.emit(
                     "camera:error",
                     {"message": f"Камера {self.camera_index} недоступна"},
                 )
                 return
+            self.emit("camera:started", {"index": self.camera_index, "backend": backend})
             target_fps = max(1, float(self.settings.get("target_fps") or 8))
             delay = 1.0 / target_fps
             start = time.time()
@@ -795,4 +796,5 @@ class CameraWorker:
                     self.emit("vision:event", event)
             cap.release()
         except Exception as exc:
+            config.log_event(f"camera error: {exc}")
             self.emit("camera:error", {"message": str(exc)})

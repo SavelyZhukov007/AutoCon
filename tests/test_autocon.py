@@ -6,6 +6,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from app import config
+from app.api import Api
 from app.core import device, llm, model_registry, runtime
 from app.core.hidden import startup_kwargs
 from app.core.vision import (
@@ -32,6 +33,12 @@ class RuntimeRegistryTests(unittest.TestCase):
         torch_failed = any(item.get("module") == "torch" for item in health["failed"])
         if not torch_failed:
             self.assertTrue(health["ok"])
+
+    def test_all_features_are_deduplicated_and_gpu_replaces_onnxruntime(self):
+        pkgs = runtime.packages_for(runtime.ALL_FEATURE_KEYS)
+        self.assertEqual(len(pkgs), len(set(pkgs)))
+        self.assertIn("onnxruntime-gpu>=1.17", pkgs)
+        self.assertNotIn("onnxruntime>=1.17", pkgs)
 
 
 class HiddenProcessTests(unittest.TestCase):
@@ -68,6 +75,15 @@ class HiddenProcessTests(unittest.TestCase):
         self.assertIn("pickletools", joined)
         self.assertIn("colorsys", joined)
 
+    def test_build_clean_targets_include_appdata_autocon(self):
+        import build
+
+        targets = [str(path) for path in build.clean_targets()]
+        self.assertIn(str(build.ROOT / "build"), targets)
+        self.assertIn(str(build.ROOT / "dist"), targets)
+        self.assertIn(str(build.BUILD_META_DIR), targets)
+        self.assertTrue(any(path.endswith("AutoCon") for path in targets))
+
 
 class DevicePolicyTests(unittest.TestCase):
     def test_cpu_preference_wins(self):
@@ -85,6 +101,71 @@ class ModelRegistryTests(unittest.TestCase):
         for pack in packs:
             self.assertTrue(pack["title"])
             self.assertTrue(pack["target"])
+
+    def test_yolo11s_requires_real_model_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_model_path = model_registry.model_path
+            try:
+                model_registry.model_path = lambda name: Path(td) / name
+                packs = {
+                    pack["key"]: pack
+                    for pack in model_registry.list_packs(
+                        {**config.DEFAULTS, "yolo_vehicle_model": "yolo11s.pt"}
+                    )
+                }
+            finally:
+                model_registry.model_path = old_model_path
+        self.assertFalse(packs["yolo11s"]["installed"])
+
+    def test_first_run_readiness_requires_full_log_and_models(self):
+        api = Api.__new__(Api)
+        api.settings = dict(config.DEFAULTS)
+
+        class FakeCli:
+            def available(self):
+                return True
+
+            def list_models(self):
+                return ["qwen2.5:3b", "qwen2.5vl:3b"]
+
+            def model_in_central_store(self, _name):
+                return True
+
+            def central_store_status(self, _names):
+                return {"ok": True, "missing": []}
+
+        old_get_llm = Api._get_llm
+        import app.core.install as install_module
+
+        old_install_check = install_module.check
+        old_health = runtime.health_check
+        old_list_packs = model_registry.list_packs
+        old_full_log = config.full_log_path
+        try:
+            Api._get_llm = lambda self: FakeCli()
+            install_module.check = lambda: []
+            runtime.health_check = lambda _keys=None: {"ok": True, "failed": []}
+            model_registry.list_packs = lambda _settings=None: [
+                {"key": "yolo11s", "installed": True},
+                {"key": "license_plate", "installed": False},
+                {"key": "vehicle_dino", "installed": False},
+            ]
+            with tempfile.TemporaryDirectory() as td:
+                missing_log = Path(td) / "ful_log_app.log"
+                config.full_log_path = lambda: missing_log
+                readiness = api.first_run_readiness()
+        finally:
+            Api._get_llm = old_get_llm
+            install_module.check = old_install_check
+            runtime.health_check = old_health
+            model_registry.list_packs = old_list_packs
+            config.full_log_path = old_full_log
+        self.assertFalse(readiness["ok"])
+        self.assertFalse(readiness["full_log_exists"])
+        self.assertEqual(
+            {pack["key"] for pack in readiness["missing_model_packs"]},
+            {"license_plate", "vehicle_dino"},
+        )
 
     def test_traffic_sign_pack_prefers_existing_hub_files(self):
         meta = model_registry.PACKS["traffic_signs_100"]

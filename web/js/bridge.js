@@ -63,6 +63,7 @@ function mockApi() {
     async stop_camera() { return { ok: true }; },
     async update_settings(patch) { return patch || {}; },
     async finish_first_run() { return true; },
+    async install_everything() { return { ok: true }; },
     async install_packages() { return { ok: true }; },
     async install_model_pack() { return { ok: true }; },
     async list_chat_projects() { return []; },
@@ -72,5 +73,6 @@ function mockApi() {
     async pull_vision_model() { return { ok: true }; },
     async set_vision_model(name) { return name || "qwen2.5vl:3b"; },
     async import_model_pack() { return { ok: true }; },
+    async explain_sign() { return { ok: true, answer: "Preview explanation." }; },
   };
 }

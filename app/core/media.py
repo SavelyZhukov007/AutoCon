@@ -60,6 +60,37 @@ def media_info(path: str) -> dict:
         pass
     return data
 
+def camera_backends():
+    import cv2
+
+    backends = []
+    for name in ("CAP_DSHOW", "CAP_MSMF"):
+        value = getattr(cv2, name, None)
+        if value is not None:
+            backends.append((name.replace("CAP_", ""), value))
+    backends.append(("DEFAULT", None))
+    return backends
+
+
+def open_camera(index: int):
+    import cv2
+
+    last_error = ""
+    for name, backend in camera_backends():
+        try:
+            cap = (
+                cv2.VideoCapture(int(index), backend)
+                if backend is not None
+                else cv2.VideoCapture(int(index))
+            )
+            if cap.isOpened():
+                return cap, name
+            cap.release()
+            last_error = f"{name} did not open"
+        except Exception as exc:
+            last_error = f"{name}: {exc}"
+    raise RuntimeError(last_error or f"camera {index} is not available")
+
 
 def list_cameras(max_index: int = 8) -> list[dict]:
     cameras = []
@@ -67,11 +98,17 @@ def list_cameras(max_index: int = 8) -> list[dict]:
         import cv2
 
         for index in range(max_index):
-            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-            ok = cap.isOpened()
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-            cap.release()
+            try:
+                cap, backend = open_camera(index)
+                ok = True
+            except Exception:
+                cap = None
+                backend = ""
+                ok = False
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) if cap else 0
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) if cap else 0
+            if cap is not None:
+                cap.release()
             if ok:
                 cameras.append(
                     {
@@ -79,6 +116,7 @@ def list_cameras(max_index: int = 8) -> list[dict]:
                         "name": f"Камера {index}",
                         "width": width,
                         "height": height,
+                        "backend": backend,
                     }
                 )
     except Exception:

@@ -24,6 +24,7 @@ import webview
 
 
 def main() -> None:
+    config.bootstrap_logging()
     guard = ensure_single_instance("AutoCon")
     api = Api()
     try:

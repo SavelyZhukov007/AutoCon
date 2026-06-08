@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .. import config
+
 
 def startup_kwargs() -> dict:
     if os.name != "nt":
@@ -29,10 +31,13 @@ def run_hidden(
     env: Optional[dict] = None,
     check: bool = False,
 ) -> subprocess.CompletedProcess:
+    cmd_list = [str(part) for part in cmd]
+    merged_env = config.central_environment(env)
+    config.log_event("$ " + " ".join(cmd_list))
     proc = subprocess.run(
-        [str(part) for part in cmd],
+        cmd_list,
         cwd=str(cwd) if cwd else None,
-        env=env,
+        env=merged_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -42,6 +47,8 @@ def run_hidden(
         timeout=timeout,
         **startup_kwargs(),
     )
+    if proc.stdout:
+        config.log_event(proc.stdout.rstrip())
     if check and proc.returncode != 0:
         raise RuntimeError(
             proc.stdout.strip() or f"Command failed with {proc.returncode}"
@@ -55,10 +62,12 @@ def popen_hidden(
     cwd: str | Path | None = None,
     env: Optional[dict] = None,
 ) -> subprocess.Popen:
+    cmd_list = [str(part) for part in cmd]
+    config.log_event("$ " + " ".join(cmd_list))
     return subprocess.Popen(
-        [str(part) for part in cmd],
+        cmd_list,
         cwd=str(cwd) if cwd else None,
-        env=env,
+        env=config.central_environment(env),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

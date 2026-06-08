@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import sys
+import threading
 from pathlib import Path
 
 APP_NAME = "AutoCon"
+_LOGGING_HOOKS_INSTALLED = False
 
 
 def app_root() -> Path:
@@ -64,6 +67,106 @@ def exports_dir() -> Path:
     return _sub("exports")
 
 
+def ollama_dir() -> Path:
+    return _sub("ollama")
+
+
+def ollama_models_dir() -> Path:
+    path = ollama_dir() / "models"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def full_log_path() -> Path:
+    path = user_data_dir() / "ful_log_app.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def cache_subdir(name: str) -> Path:
+    path = cache_dir() / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def central_environment(base: dict | None = None) -> dict:
+    env = dict(base or os.environ)
+    env.update(
+        {
+            "OLLAMA_MODELS": str(ollama_models_dir()),
+            "HF_HOME": str(cache_subdir("huggingface")),
+            "HUGGINGFACE_HUB_CACHE": str(cache_subdir("huggingface") / "hub"),
+            "TORCH_HOME": str(cache_subdir("torch")),
+            "YOLO_CONFIG_DIR": str(cache_subdir("ultralytics")),
+            "ULTRALYTICS_CONFIG_DIR": str(cache_subdir("ultralytics")),
+            "MPLCONFIGDIR": str(cache_subdir("matplotlib")),
+        }
+    )
+    if os.name != "nt":
+        env.setdefault("XDG_CACHE_HOME", str(cache_dir()))
+    return env
+
+
+def configure_central_environment() -> None:
+    os.environ.update(central_environment())
+
+
+def bootstrap_logging() -> Path:
+    global _LOGGING_HOOKS_INSTALLED
+    configure_central_environment()
+    path = full_log_path()
+    root = logging.getLogger()
+    if not any(
+        isinstance(handler, logging.FileHandler)
+        and Path(getattr(handler, "baseFilename", "")) == path
+        for handler in root.handlers
+    ):
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s [%(name)s] %(threadName)s: %(message)s"
+            )
+        )
+        root.addHandler(handler)
+        root.setLevel(logging.INFO)
+
+    if not _LOGGING_HOOKS_INSTALLED:
+        def excepthook(exc_type, exc, tb) -> None:
+            logging.getLogger(APP_NAME).critical(
+                "Uncaught exception", exc_info=(exc_type, exc, tb)
+            )
+            if getattr(sys, "__excepthook__", None):
+                sys.__excepthook__(exc_type, exc, tb)
+
+        sys.excepthook = excepthook
+
+        if hasattr(threading, "excepthook"):
+            old_thread_hook = threading.excepthook
+
+            def thread_hook(args) -> None:
+                logging.getLogger(APP_NAME).critical(
+                    "Uncaught thread exception",
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                )
+                old_thread_hook(args)
+
+            threading.excepthook = thread_hook
+        _LOGGING_HOOKS_INSTALLED = True
+    return path
+
+
+def log_event(message: str, *, level: int = logging.INFO, exc_info=None) -> None:
+    try:
+        bootstrap_logging()
+        logging.getLogger(APP_NAME).log(level, message, exc_info=exc_info)
+    except Exception:
+        try:
+            with full_log_path().open("a", encoding="utf-8") as file:
+                file.write(message + "\n")
+        except Exception:
+            pass
+
+
 def executable_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -98,6 +201,7 @@ def _runtime_site_packages() -> list[Path]:
 
 def bootstrap_runtime_packages() -> Path:
     """Make packages installed by the first-run wizard importable."""
+    configure_central_environment()
     candidates = _runtime_site_packages()
     for path in reversed(candidates):
         if path.exists():

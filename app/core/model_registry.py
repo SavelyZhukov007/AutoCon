@@ -57,7 +57,16 @@ PACKS = {
         "target": "license-plate-yolo11.pt",
         "kind": "hf",
         "repo": "morsetechlab/yolov11-license-plate-detection",
-        "filenames": ["best.pt", "license_plate_detector.pt", "model.pt"],
+        "filenames": [
+            "license-plate-finetune-v1s.pt",
+            "license-plate-finetune-v1n.pt",
+            "license-plate-finetune-v1m.pt",
+            "license-plate-finetune-v1l.pt",
+            "license-plate-finetune-v1x.pt",
+            "best.pt",
+            "license_plate_detector.pt",
+            "model.pt",
+        ],
     },
     "vehicle_dino": {
         "title": "VehicleDINO INT8 ONNX",
@@ -67,9 +76,19 @@ PACKS = {
         "target": "vehicledino-int8.onnx",
         "kind": "hf",
         "repo": "wms2537/VehicleDINO",
-        "filenames": ["vehicle-dino-int8.onnx", "model_int8.onnx", "model.onnx"],
+        "filenames": [
+            "vehicledino_dinov2_int8.onnx",
+            "vehicledino_dinov2_int8_coco.onnx",
+            "vehicledino_dinov2.onnx",
+            "vehicledino_dinov2_coco.onnx",
+            "vehicle-dino-int8.onnx",
+            "model_int8.onnx",
+            "model.onnx",
+        ],
     },
 }
+
+ALL_PACK_KEYS = tuple(PACKS.keys())
 
 
 def model_path(filename: str) -> Path:
@@ -81,9 +100,7 @@ def list_packs(settings: Optional[dict] = None) -> list[dict]:
     items = []
     for key, meta in PACKS.items():
         target = model_path(meta["target"])
-        active = settings.get(meta["settings_key"]) or (
-            meta["target"] if key == "yolo11s" else ""
-        )
+        active = settings.get(meta["settings_key"]) or ""
         items.append(
             {
                 "key": key,
@@ -91,7 +108,7 @@ def list_packs(settings: Optional[dict] = None) -> list[dict]:
                 "desc": meta["desc"],
                 "recommended": meta["recommended"],
                 "target": str(target),
-                "installed": target.exists() or (key == "yolo11s" and bool(active)),
+                "installed": target.exists(),
                 "active": active,
                 "kind": meta["kind"],
                 "manual_import": bool(meta.get("manual_import")),
@@ -132,6 +149,77 @@ def pick_existing_hf_file(runtime_python: Path, repo: str, filenames: list[str])
     return {"ok": True, "filename": data["match"]}
 
 
+def _install_ultralytics_pack(
+    key: str,
+    meta: dict,
+    target: Path,
+    runtime_python: Path,
+    progress: Callable[[float, str], None],
+) -> dict:
+    progress(0.1, "Downloading Ultralytics asset")
+    script = (
+        "import json\n"
+        "import shutil\n"
+        "import urllib.request\n"
+        "from pathlib import Path\n"
+        f"name={meta['target']!r}\n"
+        f"target=Path({str(target)!r})\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "def candidate_urls():\n"
+        "    api='https://api.github.com/repos/ultralytics/assets/releases/latest'\n"
+        "    try:\n"
+        "        req=urllib.request.Request(api, headers={'User-Agent': 'AutoCon'})\n"
+        "        with urllib.request.urlopen(req, timeout=30) as r:\n"
+        "            data=json.load(r)\n"
+        "        for item in data.get('assets', []):\n"
+        "            if item.get('name') == name and item.get('browser_download_url'):\n"
+        "                yield item['browser_download_url']\n"
+        "    except Exception as exc:\n"
+        "        print('latest lookup failed:', exc)\n"
+        "    for tag in ('v8.4.0', 'v8.3.0', 'v8.2.0', 'v0.0.0'):\n"
+        "        yield f'https://github.com/ultralytics/assets/releases/download/{tag}/{name}'\n"
+        "last=''\n"
+        "for url in candidate_urls():\n"
+        "    tmp=target.with_suffix(target.suffix + '.download')\n"
+        "    try:\n"
+        "        if tmp.exists():\n"
+        "            tmp.unlink()\n"
+        "        req=urllib.request.Request(url, headers={'User-Agent': 'AutoCon'})\n"
+        "        with urllib.request.urlopen(req, timeout=300) as r, open(tmp, 'wb') as f:\n"
+        "            shutil.copyfileobj(r, f)\n"
+        "        if tmp.stat().st_size < 100000:\n"
+        "            raise RuntimeError(f'downloaded file is too small: {tmp.stat().st_size}')\n"
+        "        tmp.replace(target)\n"
+        "        print(json.dumps({'ok': True, 'url': url, 'path': str(target), 'bytes': target.stat().st_size}))\n"
+        "        raise SystemExit(0)\n"
+        "    except Exception as exc:\n"
+        "        last=f'{url}: {exc}'\n"
+        "        print('download failed:', last)\n"
+        "        try:\n"
+        "            tmp.unlink()\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "raise SystemExit(last or 'Ultralytics asset download failed')\n"
+    )
+    result = run_hidden(
+        [str(runtime_python), "-c", script], timeout=900, cwd=target.parent
+    )
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stdout[-1000:]}
+    if not target.exists():
+        cache = find_file(config.cache_dir(), meta["target"])
+        if cache and cache != target:
+            shutil.copy2(cache, target)
+    if not target.exists():
+        return {
+            "ok": False,
+            "error": "Ultralytics did not create the expected local model file.",
+        }
+    progress(1.0, "Model installed")
+    config.log_event(f"Model pack installed: {key} -> {target}")
+    return {"ok": True, "path": str(target)}
+
+
 def install_pack(
     key: str, runtime_python: Path, on_progress: Optional[Callable[[dict], None]] = None
 ) -> dict:
@@ -149,20 +237,7 @@ def install_pack(
 
     try:
         if meta["kind"] == "ultralytics":
-            progress(0.1, "Запуск Ultralytics download")
-            script = "from ultralytics import YOLO\n" f"YOLO({meta['target']!r})\n"
-            result = run_hidden([str(runtime_python), "-c", script], timeout=900)
-            if result.returncode != 0:
-                return {"ok": False, "error": result.stdout[-1000:]}
-            cache = find_file(Path.home(), meta["target"])
-            if cache and cache != target:
-                shutil.copy2(cache, target)
-            elif not target.exists():
-                # Ultralytics can load by model name from cache; store the model name as active.
-                progress(1.0, "Модель будет загружаться кэшем Ultralytics")
-                return {"ok": True, "path": meta["target"], "virtual": True}
-            progress(1.0, "Модель установлена")
-            return {"ok": True, "path": str(target)}
+            return _install_ultralytics_pack(key, meta, target, runtime_python, progress)
 
         progress(0.1, "Проверка файлов Hugging Face Hub")
         last_error = ""
@@ -187,6 +262,7 @@ def install_pack(
             result = run_hidden([str(runtime_python), "-c", script], timeout=1800)
             if result.returncode == 0 and target.exists():
                 progress(1.0, "Модель установлена")
+                config.log_event(f"Model pack installed: {key} -> {target}")
                 return {"ok": True, "path": str(target), "repo": repo, "filename": filename}
             last_error = result.stdout[-1000:]
         return {

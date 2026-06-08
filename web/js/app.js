@@ -18,6 +18,8 @@ const state = {
   examImage: null,
   chatAnswerEl: null,
   chatAnswerBuf: "",
+  signHotspots: [],
+  firstRunInstalling: false,
 };
 
 ready().then(async (api) => {
@@ -40,7 +42,7 @@ function bind() {
   $("#btnPlay").addEventListener("click", togglePlay);
   $("#seek").addEventListener("input", seekVideo);
   $("#video").addEventListener("timeupdate", onVideoTime);
-  $("#video").addEventListener("play", startVideoRealtime);
+  $("#videoOverlay").addEventListener("click", explainClickedSign);
   $("#video").addEventListener("loadedmetadata", () => $("#tcDur").textContent = fmt($("#video").duration));
   $("#btnStartCamera").addEventListener("click", startCamera);
   $("#btnStopCamera").addEventListener("click", stopCamera);
@@ -75,6 +77,31 @@ function bindBus() {
   });
   Bus.on("install:done", async (d) => {
     $("#installLog").textContent = d.ok ? "Runtime установлен." : `Ошибка установки: ${JSON.stringify(d.failed || d.error || d)}`;
+    await refreshEnv();
+  });
+  Bus.on("setup:progress", (d) => {
+    state.firstRunInstalling = true;
+    $("#installProgress").classList.remove("hidden");
+    if (typeof d.progress === "number") $("#installFill").style.width = Math.round(d.progress * 100) + "%";
+    $("#installLog").classList.remove("hidden");
+    $("#installLog").textContent = `${d.text || ""}\n${d.phase || ""}${d.model ? " · " + d.model : ""}${d.pack ? " · " + d.pack : ""}\nlog: ${d.log_path || ""}`;
+    $("#installRun").disabled = true;
+    $("#installSkip").disabled = true;
+    $("#installClose").disabled = true;
+  });
+  Bus.on("setup:done", async (d) => {
+    state.firstRunInstalling = false;
+    $("#installRun").disabled = false;
+    $("#installClose").disabled = false;
+    $("#installLog").classList.remove("hidden");
+    if (d.ok) {
+      $("#installLog").textContent = `Готово.\nlog: ${d.log_path || ""}`;
+      $("#installOverlay").classList.remove("open");
+      await refreshEnv();
+      return;
+    }
+    $("#installSkip").disabled = false;
+    $("#installLog").textContent = `Ошибка первого запуска:\n${JSON.stringify(d.failed || d.error || d, null, 2)}\nlog: ${d.log_path || ""}`;
     await refreshEnv();
   });
   Bus.on("model:progress", (d) => {
@@ -116,6 +143,10 @@ function bindBus() {
     $("#btnExport").disabled = false;
     renderAll();
   });
+  Bus.on("process:error", (d) => {
+    $("#processBox").classList.add("hidden");
+    $("#liveComment").textContent = d.message || "Ошибка анализа видео";
+  });
   Bus.on("video:analysis_start", () => {
     state.videoRealtimeRunning = true;
     $("#videoRealtimeStatus").textContent = "анализ запущен";
@@ -152,13 +183,19 @@ function bindBus() {
     $("#liveComment").textContent = d.text || "";
     renderComments();
   });
+  Bus.on("camera:started", (d) => {
+    state.cameraRunning = true;
+    $("#liveComment").textContent = `Камера ${d.index ?? ""} запущена${d.backend ? " · " + d.backend : ""}`;
+  });
   Bus.on("vision:frame", (d) => {
     $("#emptyCamera").classList.add("hidden");
+    state.cameraRunning = true;
     $("#cameraFrame").src = d.image || "";
     state.currentDetections = d.detections || [];
     requestAnimationFrame(() => drawBoxes($("#cameraOverlay"), state.currentDetections, $("#cameraFrame")));
   });
   Bus.on("camera:error", (d) => {
+    state.cameraRunning = false;
     $("#liveComment").textContent = d.message || "Ошибка камеры";
   });
   Bus.on("exam:image_loaded", (d) => {
@@ -224,6 +261,9 @@ async function maybeFirstRun() {
   $("#modelList").innerHTML = models.map((p) => checkRow("model:" + p.key, p.title, p.desc, p.installed, p.recommended, true)).join("");
   mountIcons($("#installOverlay"));
   $("#installOverlay").classList.add("open");
+  $("#installRun").disabled = false;
+  $("#installSkip").disabled = false;
+  $("#installClose").disabled = false;
 }
 
 function checkRow(key, title, desc, installed, recommended, available) {
@@ -241,7 +281,12 @@ async function installSelected() {
 }
 
 async function finishFirstRun() {
-  await API.finish_first_run();
+  const ok = await API.finish_first_run();
+  if (!ok) {
+    $("#installLog").classList.remove("hidden");
+    $("#installLog").textContent = "Первый запуск ещё не готов: установите все пакеты и модели.";
+    return;
+  }
   $("#installOverlay").classList.remove("open");
   await refreshEnv();
 }
@@ -268,15 +313,27 @@ function loadProject(p) {
   showView("video");
   renderAll();
   renderCurrentContext(null);
-  startVideoRealtime();
+  analyze();
   refreshChatProjects();
 }
 
 async function analyze() {
   state.detections = [];
   state.contexts = [];
+  state.signSeq = [];
+  state.vehicles = [];
+  state.plates = [];
+  state.comments = [];
+  state.signHotspots = [];
+  $("#eventList").innerHTML = "";
+  $("#signPopover").classList.add("hidden");
+  $("#btnExport").disabled = true;
+  renderAll();
   renderCurrentContext(null);
-  await startVideoRealtime(true);
+  const res = await API.process_video();
+  if (res && res.ok === false) {
+    $("#liveComment").textContent = res.error || "Не удалось начать анализ";
+  }
 }
 
 async function startVideoRealtime(force = false) {
@@ -354,13 +411,13 @@ function renderCurrentContext(ctx) {
 async function refreshCameras() {
   const cams = await API.list_camera_devices();
   $("#cameraList").innerHTML = cams.length
-    ? cams.map((c) => `<option value="${c.index}">${esc(c.name)} ${c.width ? `(${c.width}x${c.height})` : ""}</option>`).join("")
+    ? cams.map((c) => `<option value="${c.index}">${esc(c.name)} ${c.width ? `(${c.width}x${c.height})` : ""}${c.backend ? ` · ${esc(c.backend)}` : ""}</option>`).join("")
     : `<option value="0">Камера 0</option>`;
 }
 
 async function startCamera() {
   showView("camera");
-  state.cameraRunning = true;
+  state.cameraRunning = false;
   await API.start_camera(Number($("#cameraList").value || 0));
 }
 
@@ -377,6 +434,8 @@ function drawBoxes(canvas, detections, mediaEl) {
   canvas.height = parent.height;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const collectHotspots = canvas.id === "videoOverlay";
+  if (collectHotspots) state.signHotspots = [];
   const naturalW = mediaEl.videoWidth || mediaEl.naturalWidth || rect.width || canvas.width;
   const naturalH = mediaEl.videoHeight || mediaEl.naturalHeight || rect.height || canvas.height;
   const scale = Math.min(canvas.width / naturalW, canvas.height / naturalH);
@@ -397,17 +456,50 @@ function drawBoxes(canvas, detections, mediaEl) {
     const tw = Math.min(ctx.measureText(label).width + 10, canvas.width - 4);
     const labelX = clamp(x, 2, Math.max(2, canvas.width - tw - 2));
     let labelY = signLike ? y + h + 3 : y - 21;
-    if (labelY + 20 > canvas.height) labelY = y - 21;
+    if (signLike) labelY = Math.min(y + h + 4, Math.max(0, canvas.height - 20));
+    else if (labelY + 20 > canvas.height) labelY = y - 21;
     labelY = clamp(labelY, 0, Math.max(0, canvas.height - 20));
     ctx.fillStyle = color;
     ctx.fillRect(labelX, labelY, tw, 20);
     ctx.fillStyle = "#061412";
     ctx.fillText(label, labelX + 5, labelY + 14);
+    if (collectHotspots && signLike) {
+      state.signHotspots.push({ x, y, w, h, labelX, labelY, labelW: tw, labelH: 20, detection: d });
+    }
   }
 }
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+async function explainClickedSign(e) {
+  if (!state.project || !state.signHotspots.length || !API.explain_sign) return;
+  const canvas = $("#videoOverlay");
+  const rect = canvas.getBoundingClientRect();
+  const sx = canvas.width / Math.max(1, rect.width);
+  const sy = canvas.height / Math.max(1, rect.height);
+  const x = (e.clientX - rect.left) * sx;
+  const y = (e.clientY - rect.top) * sy;
+  const hit = state.signHotspots.find((h) =>
+    (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) ||
+    (x >= h.labelX && x <= h.labelX + h.labelW && y >= h.labelY && y <= h.labelY + h.labelH)
+  );
+  if (!hit) {
+    $("#signPopover").classList.add("hidden");
+    return;
+  }
+  const pop = $("#signPopover");
+  const left = clamp(hit.x + hit.w + 12, 8, Math.max(8, canvas.width - 300));
+  const top = clamp(hit.y, 8, Math.max(8, canvas.height - 150));
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
+  pop.classList.remove("hidden");
+  pop.innerHTML = `<b>${esc(hit.detection.label || "sign")}</b><p>Анализирую влияние знака...</p>`;
+  const v = $("#video");
+  const ctx = state.currentContext || contextAt(v.currentTime || hit.detection.time || 0);
+  const res = await API.explain_sign(state.project.id || "", hit.detection, ctx, v.currentTime || hit.detection.time || 0);
+  pop.innerHTML = `<b>${esc(hit.detection.label || "sign")}</b><p>${esc(res?.answer || res?.error || "Нет ответа")}</p>`;
 }
 
 function addEvent(e) {
